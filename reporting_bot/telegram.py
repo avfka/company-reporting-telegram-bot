@@ -139,6 +139,7 @@ def _help_text() -> str:
         "<b>Бот отчётности</b>\n\n"
         "/reports — список доступных отчётов\n"
         "/reports_sks — подробный Excel-отчёт СКС с выбором дат\n"
+        "/reports_dota — Excel-отчёт ДОТ по запускам и выпускам\n"
         "/run &lt;отчёт&gt; [параметр=значение] — сформировать отчёт\n"
         "/whoami — показать ваш Telegram ID\n"
         "/help — помощь"
@@ -150,6 +151,8 @@ def _report_list(catalog: ReportCatalog) -> str:
         "<b>Доступные отчёты</b>",
         "\n<code>reports_sks</code> — Подробный отчёт СКС",
         "Excel со сводкой, показателями по специалистам и проектной детализацией. Команда: /reports_sks",
+        "\n<code>reports_dota</code> — Отчёт ДОТ по запускам и выпускам",
+        "Excel со сводкой, ежедневной динамикой и детализацией проектов. Команда: /reports_dota",
     ]
     for report in catalog.all():
         suffix = ""
@@ -173,63 +176,70 @@ def _month_title(value: date) -> str:
     return f"{names[value.month - 1]} {value.year}"
 
 
-def _calendar_markup(mode: str, month: date, start: date | None = None) -> dict[str, Any]:
+def _calendar_markup(
+    report_prefix: str,
+    mode: str,
+    month: date,
+    start: date | None = None,
+) -> dict[str, Any]:
+    if report_prefix not in {"sks", "dota"}:
+        raise ValueError("Unknown report prefix")
     if mode not in {"from", "to"}:
         raise ValueError("Unknown calendar mode")
     previous = _month_shift(month, -1)
     following = _month_shift(month, 1)
     if mode == "from":
-        previous_data = f"sks:month_from:{previous:%Y-%m}"
-        following_data = f"sks:month_from:{following:%Y-%m}"
+        previous_data = f"{report_prefix}:month_from:{previous:%Y-%m}"
+        following_data = f"{report_prefix}:month_from:{following:%Y-%m}"
     else:
         if start is None:
             raise ValueError("End-date calendar needs a start date")
-        previous_data = f"sks:month_to:{start.isoformat()}:{previous:%Y-%m}"
-        following_data = f"sks:month_to:{start.isoformat()}:{following:%Y-%m}"
+        previous_data = f"{report_prefix}:month_to:{start.isoformat()}:{previous:%Y-%m}"
+        following_data = f"{report_prefix}:month_to:{start.isoformat()}:{following:%Y-%m}"
 
     keyboard: list[list[dict[str, str]]] = [
         [
             {"text": "‹", "callback_data": previous_data},
-            {"text": _month_title(month), "callback_data": "sks:noop"},
+            {"text": _month_title(month), "callback_data": f"{report_prefix}:noop"},
             {"text": "›", "callback_data": following_data},
         ],
-        [{"text": value, "callback_data": "sks:noop"} for value in ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")],
+        [{"text": value, "callback_data": f"{report_prefix}:noop"} for value in ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")],
     ]
     for week in calendar.Calendar(firstweekday=0).monthdatescalendar(month.year, month.month):
         row = []
         for day in week:
             if day.month != month.month:
-                row.append({"text": "·", "callback_data": "sks:noop"})
+                row.append({"text": "·", "callback_data": f"{report_prefix}:noop"})
             elif mode == "from":
-                row.append({"text": str(day.day), "callback_data": f"sks:from:{day.isoformat()}"})
+                row.append({"text": str(day.day), "callback_data": f"{report_prefix}:from:{day.isoformat()}"})
             elif start is not None and day < start:
-                row.append({"text": "·", "callback_data": "sks:noop"})
+                row.append({"text": "·", "callback_data": f"{report_prefix}:noop"})
             else:
-                row.append({"text": str(day.day), "callback_data": f"sks:to:{start.isoformat()}:{day.isoformat()}"})
+                row.append({"text": str(day.day), "callback_data": f"{report_prefix}:to:{start.isoformat()}:{day.isoformat()}"})
         keyboard.append(row)
     return {"inline_keyboard": keyboard}
 
 
-def _sks_entry_markup(today: date) -> dict[str, Any]:
+def _report_entry_markup(report_prefix: str, today: date) -> dict[str, Any]:
     current_month = today.replace(day=1)
     previous_month = _month_shift(current_month, -1)
     previous_month_end = current_month - timedelta(days=1)
     return {
         "inline_keyboard": [
-            [{"text": "Последние 7 дней", "callback_data": f"sks:preset:{(today - timedelta(days=6)).isoformat()}:{today.isoformat()}"}],
-            [{"text": "Текущий месяц", "callback_data": f"sks:preset:{current_month.isoformat()}:{today.isoformat()}"}],
-            [{"text": "Прошлый месяц", "callback_data": f"sks:preset:{previous_month.isoformat()}:{previous_month_end.isoformat()}"}],
-            [{"text": "Выбрать даты", "callback_data": f"sks:month_from:{current_month:%Y-%m}"}],
+            [{"text": "Последние 7 дней", "callback_data": f"{report_prefix}:preset:{(today - timedelta(days=6)).isoformat()}:{today.isoformat()}"}],
+            [{"text": "Текущий месяц", "callback_data": f"{report_prefix}:preset:{current_month.isoformat()}:{today.isoformat()}"}],
+            [{"text": "Прошлый месяц", "callback_data": f"{report_prefix}:preset:{previous_month.isoformat()}:{previous_month_end.isoformat()}"}],
+            [{"text": "Выбрать даты", "callback_data": f"{report_prefix}:month_from:{current_month:%Y-%m}"}],
         ]
     }
 
 
-def _parse_sks_dates(text_value: str) -> tuple[date, date] | None:
+def _parse_report_dates(text_value: str, command_name: str) -> tuple[date, date] | None:
     parts = shlex.split(text_value)
     if len(parts) == 1:
         return None
     if len(parts) != 3:
-        raise ValueError("Формат: /reports_sks ГГГГ-ММ-ДД ГГГГ-ММ-ДД")
+        raise ValueError(f"Формат: /{command_name} ГГГГ-ММ-ДД ГГГГ-ММ-ДД")
     try:
         date_from = date.fromisoformat(parts[1])
         date_to = date.fromisoformat(parts[2])
@@ -310,6 +320,7 @@ async def handle_message(
     send_message: Callable[..., Awaitable[None]],
     run_report: Callable[[Report, Mapping[str, str]], Awaitable[QueryResult]],
     send_sks_report: Callable[[int, date, date], Awaitable[None]] | None = None,
+    send_dota_report: Callable[[int, date, date], Awaitable[None]] | None = None,
 ) -> None:
     command = message.text.split(maxsplit=1)[0].split("@", 1)[0].lower()
 
@@ -333,7 +344,7 @@ async def handle_message(
             await send_message(message.chat_id, "Отчёт СКС временно недоступен.")
             return
         try:
-            selected = _parse_sks_dates(message.text)
+            selected = _parse_report_dates(message.text, "reports_sks")
         except ValueError as exc:
             await send_message(message.chat_id, str(exc))
             return
@@ -342,11 +353,31 @@ async def handle_message(
             await send_message(
                 message.chat_id,
                 "<b>Отчёт СКС</b>\n\nВыберите период или отправьте команду:\n<code>/reports_sks 2026-07-01 2026-07-31</code>",
-                _sks_entry_markup(today),
+                _report_entry_markup("sks", today),
             )
             return
         await send_message(message.chat_id, "Формирую Excel-отчёт СКС…")
         await send_sks_report(message.chat_id, *selected)
+        return
+    if command in ("/reports_dota", "reports_dota"):
+        if send_dota_report is None:
+            await send_message(message.chat_id, "Отчёт ДОТ временно недоступен.")
+            return
+        try:
+            selected = _parse_report_dates(message.text, "reports_dota")
+        except ValueError as exc:
+            await send_message(message.chat_id, str(exc))
+            return
+        if selected is None:
+            today = datetime.now(ZoneInfo("Europe/Moscow")).date()
+            await send_message(
+                message.chat_id,
+                "<b>Отчёт ДОТ</b>\n\nВыберите период или отправьте команду:\n<code>/reports_dota 2026-08-01 2026-08-31</code>",
+                _report_entry_markup("dota", today),
+            )
+            return
+        await send_message(message.chat_id, "Формирую Excel-отчёт ДОТ…")
+        await send_dota_report(message.chat_id, *selected)
         return
     if command == "/run":
         try:
@@ -369,6 +400,7 @@ async def handle_callback(
     send_message: Callable[..., Awaitable[None]],
     answer_callback: Callable[[str], Awaitable[None]],
     send_sks_report: Callable[[int, date, date], Awaitable[None]],
+    send_dota_report: Callable[[int, date, date], Awaitable[None]] | None = None,
 ) -> None:
     await answer_callback(callback.callback_query_id)
     if callback.chat_type != "private":
@@ -377,9 +409,21 @@ async def handle_callback(
     if callback.user_id not in settings.allowed_user_ids:
         await send_message(callback.chat_id, "Доступ запрещён. Используйте /whoami и передайте ID администратору.")
         return
-    if not callback.data.startswith("sks:"):
+    if not callback.data.startswith(("sks:", "dota:")):
         return
     parts = callback.data.split(":")
+    report_prefix = parts[0]
+    if report_prefix == "sks":
+        report_title = "СКС"
+        report_command = "/reports_sks"
+        send_report = send_sks_report
+    else:
+        report_title = "ДОТ"
+        report_command = "/reports_dota"
+        send_report = send_dota_report
+    if send_report is None:
+        await send_message(callback.chat_id, f"Отчёт {report_title} временно недоступен.")
+        return
     try:
         action = parts[1]
         if action == "noop":
@@ -387,25 +431,25 @@ async def handle_callback(
         if action == "preset" and len(parts) == 4:
             date_from = date.fromisoformat(parts[2])
             date_to = date.fromisoformat(parts[3])
-            await send_message(callback.chat_id, "Формирую Excel-отчёт СКС…")
-            await send_sks_report(callback.chat_id, date_from, date_to)
+            await send_message(callback.chat_id, f"Формирую Excel-отчёт {report_title}…")
+            await send_report(callback.chat_id, date_from, date_to)
             return
         if action == "month_from" and len(parts) == 3:
             month = date.fromisoformat(parts[2] + "-01")
-            await send_message(callback.chat_id, "Выберите <b>дату начала</b>:", _calendar_markup("from", month))
+            await send_message(callback.chat_id, "Выберите <b>дату начала</b>:", _calendar_markup(report_prefix, "from", month))
             return
         if action == "from" and len(parts) == 3:
             date_from = date.fromisoformat(parts[2])
             await send_message(
                 callback.chat_id,
                 f"Начало: <b>{date_from:%d.%m.%Y}</b>\nТеперь выберите дату окончания:",
-                _calendar_markup("to", date_from.replace(day=1), date_from),
+                _calendar_markup(report_prefix, "to", date_from.replace(day=1), date_from),
             )
             return
         if action == "month_to" and len(parts) == 4:
             date_from = date.fromisoformat(parts[2])
             month = date.fromisoformat(parts[3] + "-01")
-            await send_message(callback.chat_id, "Выберите <b>дату окончания</b>:", _calendar_markup("to", month, date_from))
+            await send_message(callback.chat_id, "Выберите <b>дату окончания</b>:", _calendar_markup(report_prefix, "to", month, date_from))
             return
         if action == "to" and len(parts) == 4:
             date_from = date.fromisoformat(parts[2])
@@ -414,10 +458,10 @@ async def handle_callback(
                 raise ValueError("Дата окончания раньше даты начала.")
             if (date_to - date_from).days > 366:
                 raise ValueError("Максимальный период отчёта — 366 дней.")
-            await send_message(callback.chat_id, "Формирую Excel-отчёт СКС…")
-            await send_sks_report(callback.chat_id, date_from, date_to)
+            await send_message(callback.chat_id, f"Формирую Excel-отчёт {report_title}…")
+            await send_report(callback.chat_id, date_from, date_to)
             return
     except (IndexError, ValueError) as exc:
         await send_message(callback.chat_id, f"Не удалось выбрать период: {html.escape(str(exc))}")
         return
-    await send_message(callback.chat_id, "Не удалось распознать выбор. Отправьте /reports_sks ещё раз.")
+    await send_message(callback.chat_id, f"Не удалось распознать выбор. Отправьте {report_command} ещё раз.")

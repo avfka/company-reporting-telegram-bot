@@ -164,6 +164,61 @@ def test_reports_sks_shows_date_buttons() -> None:
     assert sent[0][1]["inline_keyboard"]
 
 
+def test_reports_dota_accepts_direct_date_range() -> None:
+    sent = []
+    generated = []
+
+    async def send(chat_id, text, reply_markup=None):
+        sent.append((chat_id, text, reply_markup))
+
+    async def run_report(report, parameters):
+        raise AssertionError("should not run")
+
+    async def send_dota(chat_id, date_from, date_to):
+        generated.append((chat_id, date_from.isoformat(), date_to.isoformat()))
+
+    asyncio.run(
+        handle_message(
+            IncomingMessage(chat_id=9, user_id=42, text="/reports_dota 2026-08-01 2026-08-31"),
+            settings(),
+            catalog(),
+            send,
+            run_report,
+            None,
+            send_dota,
+        )
+    )
+    assert "ДОТ" in sent[0][1]
+    assert generated == [(9, "2026-08-01", "2026-08-31")]
+
+
+def test_reports_dota_shows_date_buttons() -> None:
+    sent = []
+
+    async def send(chat_id, text, reply_markup=None):
+        sent.append((text, reply_markup))
+
+    async def run_report(report, parameters):
+        raise AssertionError("should not run")
+
+    async def send_dota(chat_id, date_from, date_to):
+        raise AssertionError("should wait for a date selection")
+
+    asyncio.run(
+        handle_message(
+            IncomingMessage(chat_id=9, user_id=42, text="/reports_dota"),
+            settings(),
+            catalog(),
+            send,
+            run_report,
+            None,
+            send_dota,
+        )
+    )
+    assert sent[0][1]["inline_keyboard"]
+    assert sent[0][1]["inline_keyboard"][0][0]["callback_data"].startswith("dota:")
+
+
 def test_sks_callback_runs_selected_period() -> None:
     generated = []
     answered = []
@@ -188,6 +243,36 @@ def test_sks_callback_runs_selected_period() -> None:
     )
     assert answered == ["callback-1"]
     assert generated == [(9, "2026-07-01", "2026-07-31")]
+
+
+def test_dota_callback_runs_selected_period() -> None:
+    generated = []
+    answered = []
+
+    async def send(chat_id, text, reply_markup=None):
+        pass
+
+    async def answer(callback_query_id):
+        answered.append(callback_query_id)
+
+    async def send_sks(chat_id, date_from, date_to):
+        raise AssertionError("should not run SKS")
+
+    async def send_dota(chat_id, date_from, date_to):
+        generated.append((chat_id, date_from.isoformat(), date_to.isoformat()))
+
+    asyncio.run(
+        handle_callback(
+            IncomingCallback("callback-2", 9, 42, "dota:to:2026-08-01:2026-08-31"),
+            settings(),
+            send,
+            answer,
+            send_sks,
+            send_dota,
+        )
+    )
+    assert answered == ["callback-2"]
+    assert generated == [(9, "2026-08-01", "2026-08-31")]
 
 
 def test_parse_callback_reads_chat_and_sender() -> None:
