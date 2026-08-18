@@ -1,0 +1,9 @@
+[project]
+name = "company-reporting-telegram-bot"
+version = "0.1.0"
+description = "Secure Telegram bot for read-only PostgreSQL reports"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

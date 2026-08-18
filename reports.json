@@ -1,0 +1,18 @@
+[
+  {
+    "id": "db_status",
+    "title": "Состояние базы данных",
+    "description": "Показывает имя БД, пользователя и время сервера.",
+    "parameters": [],
+    "max_rows": 10,
+    "sql": "SELECT current_database() AS database_name, current_user AS database_user, CURRENT_TIMESTAMP AS server_time"
+  },
+  {
+    "id": "table_catalog",
+    "title": "Доступные таблицы",
+    "description": "Список таблиц, доступных read-only пользователю.",
+    "parameters": [],
+    "max_rows": 100,
+    "sql": "SELECT table_schema, table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND table_schema NOT IN ('pg_catalog', 'information_schema') ORDER BY table_schema, table_name"
+  }
+]

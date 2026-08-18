@@ -1,0 +1,10 @@
+[
+  {
+    "id": "daily_sales",
+    "title": "Продажи за день",
+    "description": "Пример бизнес-отчёта; адаптируйте таблицу и поля под схему компании.",
+    "parameters": ["report_date"],
+    "max_rows": 100,
+    "sql": "SELECT department, COUNT(*) AS orders_count, SUM(total_amount) AS revenue FROM orders WHERE created_at >= CAST(:report_date AS DATE) AND created_at < CAST(:report_date AS DATE) + INTERVAL '1 day' GROUP BY department ORDER BY revenue DESC"
+  }
+]
