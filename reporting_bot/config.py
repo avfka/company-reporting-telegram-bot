@@ -37,10 +37,12 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
+        allowed_user_ids = _user_ids(os.getenv("ALLOWED_TELEGRAM_USER_IDS", ""))
+        extra_user_ids = _user_ids(os.getenv("ALLOWED_TELEGRAM_USER_IDS_EXTRA", ""))
         return cls(
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
             telegram_webhook_secret=os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip(),
-            allowed_user_ids=_user_ids(os.getenv("ALLOWED_TELEGRAM_USER_IDS", "")),
+            allowed_user_ids=allowed_user_ids | extra_user_ids,
             database_url=os.getenv("DATABASE_URL", "").strip(),
             reports_path=os.getenv("REPORTS_PATH", "reports.json").strip() or "reports.json",
             statement_timeout_ms=_positive_int("DB_STATEMENT_TIMEOUT_MS", 10_000),

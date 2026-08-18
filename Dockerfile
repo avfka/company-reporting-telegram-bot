@@ -17,6 +17,7 @@ FROM base AS test
 
 COPY requirements-dev.txt pyproject.toml ./
 RUN pip install --no-cache-dir -r requirements-dev.txt
+COPY scripts ./scripts
 COPY tests ./tests
 RUN pytest -q
 

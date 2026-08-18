@@ -87,6 +87,7 @@ python scripts/set_webhook.py
 | `TELEGRAM_WEBHOOK_SECRET` | случайная строка из букв, цифр, `_`, `-` |
 | `APP_URL` | production URL приложения без завершающего `/` |
 | `ALLOWED_TELEGRAM_USER_IDS` | Telegram ID через запятую |
+| `ALLOWED_TELEGRAM_USER_IDS_EXTRA` | дополнительные Telegram ID без замены основного списка |
 | `DATABASE_URL` | URL PostgreSQL для read-only пользователя |
 | `REPORTS_PATH` | путь к JSON с отчётами |
 | `DB_STATEMENT_TIMEOUT_MS` | максимальное время SQL-запроса |
