@@ -14,6 +14,11 @@ def required(name: str) -> str:
 
 
 def main() -> None:
+    vercel_environment = os.getenv("VERCEL_ENV", "").strip()
+    if vercel_environment and vercel_environment != "production":
+        print(f"Skipping webhook setup for Vercel environment: {vercel_environment}")
+        return
+
     token = required("TELEGRAM_BOT_TOKEN")
     secret = required("TELEGRAM_WEBHOOK_SECRET")
     app_url = required("APP_URL").rstrip("/")

@@ -85,6 +85,7 @@ python scripts/set_webhook.py
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | токен от BotFather |
 | `TELEGRAM_WEBHOOK_SECRET` | случайная строка из букв, цифр, `_`, `-` |
+| `APP_URL` | production URL приложения без завершающего `/` |
 | `ALLOWED_TELEGRAM_USER_IDS` | Telegram ID через запятую |
 | `DATABASE_URL` | URL PostgreSQL для read-only пользователя |
 | `REPORTS_PATH` | путь к JSON с отчётами |
@@ -94,6 +95,6 @@ python scripts/set_webhook.py
 
 ## Деплой на Vercel
 
-Vercel распознаёт переменную `app` в `app.py` как ASGI-приложение. Добавьте runtime-переменные в Production, выполните production deploy, затем запустите `scripts/set_webhook.py` с `APP_URL`, равным production URL.
+Vercel распознаёт переменную `app` в `app.py` как ASGI-приложение. Добавьте переменные в Production и выполните production deploy. Build hook автоматически зарегистрирует Telegram webhook только для production-окружения.
 
 Важно: Vercel должен иметь сетевой доступ к PostgreSQL. Если база доступна только внутри корпоративной сети/VPN, разместите сервис в той же сети или настройте безопасный прокси/туннель; не открывайте БД всему интернету.
