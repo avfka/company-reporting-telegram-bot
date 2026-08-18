@@ -55,7 +55,7 @@ class ReportingBotApp:
         }
 
     async def _webhook(self, scope, receive, send) -> None:
-        if not self.settings.ready:
+        if not self.settings.webhook_ready:
             await self._json(
                 send,
                 503,

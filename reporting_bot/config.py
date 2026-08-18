@@ -49,12 +49,9 @@ class Settings:
         )
 
     @property
+    def webhook_ready(self) -> bool:
+        return bool(self.telegram_bot_token and self.telegram_webhook_secret)
+
+    @property
     def ready(self) -> bool:
-        return all(
-            (
-                self.telegram_bot_token,
-                self.telegram_webhook_secret,
-                self.database_url,
-                self.allowed_user_ids,
-            )
-        )
+        return bool(self.webhook_ready and self.database_url and self.allowed_user_ids)

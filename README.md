@@ -42,6 +42,8 @@ export APP_URL=https://your-public-url.example
 python scripts/set_webhook.py
 ```
 
+Если Telegram ID ещё неизвестен, сначала задайте токен и webhook-secret, зарегистрируйте webhook и отправьте боту `/whoami`. После этого добавьте полученный ID в `ALLOWED_TELEGRAM_USER_IDS` и настройте `DATABASE_URL`.
+
 ## Команды бота
 
 ```text

@@ -45,3 +45,22 @@ def test_webhook_rejects_invalid_secret() -> None:
         )
     )
     assert response.status_code == 401
+
+
+def test_webhook_accepts_setup_update_before_database_is_configured() -> None:
+    setup_settings = Settings(
+        telegram_bot_token="token",
+        telegram_webhook_secret="secret",
+        allowed_user_ids=frozenset(),
+        database_url="",
+    )
+    response = asyncio.run(
+        request(
+            create_app(setup_settings),
+            "POST",
+            "/telegram/webhook",
+            headers={"X-Telegram-Bot-Api-Secret-Token": "secret"},
+            json={"update_id": 1},
+        )
+    )
+    assert response.status_code == 200

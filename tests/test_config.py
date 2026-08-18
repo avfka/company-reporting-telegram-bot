@@ -19,3 +19,4 @@ def test_not_ready_without_allowlist() -> None:
         database_url="postgresql+psycopg://user:pass@localhost/db",
     )
     assert settings.ready is False
+    assert settings.webhook_ready is True
