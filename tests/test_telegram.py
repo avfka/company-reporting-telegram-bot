@@ -3,7 +3,13 @@ import asyncio
 from reporting_bot.config import Settings
 from reporting_bot.database import QueryResult
 from reporting_bot.reports import Report, ReportCatalog
-from reporting_bot.telegram import IncomingMessage, handle_message
+from reporting_bot.telegram import (
+    IncomingCallback,
+    IncomingMessage,
+    handle_callback,
+    handle_message,
+    parse_callback,
+)
 
 
 def settings() -> Settings:
@@ -104,3 +110,97 @@ def test_group_chat_cannot_receive_report() -> None:
         )
     )
     assert "только в личном чате" in sent[0]
+
+
+def test_reports_sks_accepts_direct_date_range() -> None:
+    sent = []
+    generated = []
+
+    async def send(chat_id, text, reply_markup=None):
+        sent.append((chat_id, text, reply_markup))
+
+    async def run_report(report, parameters):
+        raise AssertionError("should not run")
+
+    async def send_sks(chat_id, date_from, date_to):
+        generated.append((chat_id, date_from.isoformat(), date_to.isoformat()))
+
+    asyncio.run(
+        handle_message(
+            IncomingMessage(chat_id=9, user_id=42, text="/reports_sks 2026-07-01 2026-07-31"),
+            settings(),
+            catalog(),
+            send,
+            run_report,
+            send_sks,
+        )
+    )
+    assert "Excel" in sent[0][1]
+    assert generated == [(9, "2026-07-01", "2026-07-31")]
+
+
+def test_reports_sks_shows_date_buttons() -> None:
+    sent = []
+
+    async def send(chat_id, text, reply_markup=None):
+        sent.append((text, reply_markup))
+
+    async def run_report(report, parameters):
+        raise AssertionError("should not run")
+
+    async def send_sks(chat_id, date_from, date_to):
+        raise AssertionError("should wait for a date selection")
+
+    asyncio.run(
+        handle_message(
+            IncomingMessage(chat_id=9, user_id=42, text="/reports_sks"),
+            settings(),
+            catalog(),
+            send,
+            run_report,
+            send_sks,
+        )
+    )
+    assert sent[0][1]["inline_keyboard"]
+
+
+def test_sks_callback_runs_selected_period() -> None:
+    generated = []
+    answered = []
+
+    async def send(chat_id, text, reply_markup=None):
+        pass
+
+    async def answer(callback_query_id):
+        answered.append(callback_query_id)
+
+    async def send_sks(chat_id, date_from, date_to):
+        generated.append((chat_id, date_from.isoformat(), date_to.isoformat()))
+
+    asyncio.run(
+        handle_callback(
+            IncomingCallback("callback-1", 9, 42, "sks:to:2026-07-01:2026-07-31"),
+            settings(),
+            send,
+            answer,
+            send_sks,
+        )
+    )
+    assert answered == ["callback-1"]
+    assert generated == [(9, "2026-07-01", "2026-07-31")]
+
+
+def test_parse_callback_reads_chat_and_sender() -> None:
+    parsed = parse_callback(
+        {
+            "callback_query": {
+                "id": "cb",
+                "from": {"id": 42},
+                "message": {"chat": {"id": 9, "type": "private"}},
+                "data": "sks:noop",
+            }
+        }
+    )
+    assert parsed is not None
+    assert parsed.chat_id == 9
+    assert parsed.user_id == 42
