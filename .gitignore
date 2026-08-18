@@ -7,3 +7,5 @@ __pycache__/
 htmlcov/
 .vercel/
 .DS_Store
+.env.local
+.env.*.local
