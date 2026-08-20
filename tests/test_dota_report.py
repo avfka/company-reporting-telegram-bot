@@ -3,12 +3,15 @@ import zipfile
 from datetime import date, datetime
 from decimal import Decimal
 
+from PIL import Image
+
 from reporting_bot.dota_report import (
     DOTA_EVENTS_SQL,
     DotaEvent,
     DotaReportData,
     _parse_monthly_plans,
     _previous_month_date,
+    build_dota_chart,
     build_dota_workbook,
 )
 
@@ -106,3 +109,25 @@ def test_detail_sheets_have_department_and_only_relevant_stage_column() -> None:
     assert "Этап запуска" in details_xml
     assert "Специалист СКС" not in details_xml
     assert "Предыдущий этап" not in details_xml
+
+
+def test_build_dota_chart_creates_readable_png() -> None:
+    content = build_dota_chart(
+        DotaReportData(
+            date_from=date(2026, 8, 1),
+            date_to=date(2026, 8, 18),
+            previous_date_from=date(2026, 7, 1),
+            previous_date_to=date(2026, 7, 18),
+            events=(
+                event("Запуск", "ОПР", "launch-1", datetime(2026, 8, 3, 10)),
+                event("Выпуск", "ОПР", "release-1", datetime(2026, 8, 10, 10)),
+            ),
+            previous_events=(
+                event("Запуск", "ОПР", "previous-1", datetime(2026, 7, 3, 10)),
+            ),
+        )
+    )
+
+    image = Image.open(io.BytesIO(content))
+    assert image.format == "PNG"
+    assert image.size == (1200, 1500)

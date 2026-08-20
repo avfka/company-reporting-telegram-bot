@@ -172,7 +172,7 @@ def _help_text() -> str:
         "<b>Бот отчётности</b>\n\n"
         "/reports — список доступных отчётов\n"
         "/reports_sks — подробный Excel-отчёт СКС с выбором дат\n"
-        "/reports_dota — Excel-отчёт ДОТ по запускам и выпускам\n"
+        "/reports_dota — инфографика и Excel-отчёт ДОТ по запускам и выпускам\n"
         "/reports_ks — меню аналитики КС: общий отчёт и отдельные разделы\n"
         "/run &lt;отчёт&gt; [параметр=значение] — сформировать отчёт\n"
         "/whoami — показать ваш Telegram ID\n"
@@ -186,7 +186,7 @@ def _report_list(catalog: ReportCatalog) -> str:
         "\n<code>reports_sks</code> — Подробный отчёт СКС",
         "Excel со сводкой, показателями по специалистам и проектной детализацией. Команда: /reports_sks",
         "\n<code>reports_dota</code> — Отчёт ДОТ по запускам и выпускам",
-        "Excel со сводкой, ежедневной динамикой и детализацией проектов. Команда: /reports_dota",
+        "Инфографика и Excel со сводкой, динамикой и детализацией проектов. Команда: /reports_dota",
         "\n<code>reports_ks</code> — Аналитика КС",
         "Общий отчёт и четыре отдельных раздела с фильтрами, Excel и графиком. Команда: /reports_ks",
     ]
@@ -660,7 +660,7 @@ async def handle_message(
                 _report_entry_markup("dota", today),
             )
             return
-        await send_message(message.chat_id, "Формирую Excel-отчёт ДОТ…")
+        await send_message(message.chat_id, "Формирую инфографику и Excel-отчёт ДОТ…")
         await send_dota_report(message.chat_id, *selected)
         return
     if command == "/run":
@@ -744,7 +744,12 @@ async def handle_callback(
                     _ks_department_markup(report_prefix, date_from, date_to, options),
                 )
                 return
-            await send_message(callback.chat_id, f"Формирую Excel-отчёт {report_title}…")
+            message_text = (
+                "Формирую инфографику и Excel-отчёт ДОТ…"
+                if report_prefix == "dota"
+                else f"Формирую Excel-отчёт {report_title}…"
+            )
+            await send_message(callback.chat_id, message_text)
             await send_report(callback.chat_id, date_from, date_to)
             return
         if action == "month_from" and len(parts) == 3:
@@ -779,7 +784,12 @@ async def handle_callback(
                     _ks_department_markup(report_prefix, date_from, date_to, options),
                 )
                 return
-            await send_message(callback.chat_id, f"Формирую Excel-отчёт {report_title}…")
+            message_text = (
+                "Формирую инфографику и Excel-отчёт ДОТ…"
+                if report_prefix == "dota"
+                else f"Формирую Excel-отчёт {report_title}…"
+            )
+            await send_message(callback.chat_id, message_text)
             await send_report(callback.chat_id, date_from, date_to)
             return
         if report_prefix in KS_PREFIXES and action == "dept" and len(parts) == 5:

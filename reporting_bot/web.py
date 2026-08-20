@@ -126,16 +126,22 @@ class ReportingBotApp:
                 )
 
             async def send_dota_report(chat_id, date_from, date_to):
-                content, filename = await asyncio.to_thread(
+                artifact = await asyncio.to_thread(
                     dota_service.create,
                     date_from,
                     date_to,
                 )
+                await telegram.send_photo(
+                    chat_id,
+                    artifact.chart,
+                    artifact.chart_filename,
+                    artifact.caption,
+                )
                 await telegram.send_document(
                     chat_id,
-                    content,
-                    filename,
-                    f"<b>Отчёт ДОТ</b> · {date_from:%d.%m.%Y}–{date_to:%d.%m.%Y}",
+                    artifact.workbook,
+                    artifact.workbook_filename,
+                    artifact.caption,
                 )
 
             async def load_ks_filters(department_token):
