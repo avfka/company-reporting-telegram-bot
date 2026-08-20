@@ -176,6 +176,15 @@ def _month_title(value: date) -> str:
     return f"{names[value.month - 1]} {value.year}"
 
 
+def _end_date_prompt(date_from: date) -> str:
+    # Telegram sizes an inline keyboard to the message bubble. Keep this prompt
+    # on one sufficiently long line so the second calendar does not collapse.
+    return (
+        f"Дата начала отчёта: <b>{date_from:%d.%m.%Y}</b> · "
+        "Выберите дату окончания отчётного периода:"
+    )
+
+
 def _calendar_markup(
     report_prefix: str,
     mode: str,
@@ -442,14 +451,14 @@ async def handle_callback(
             date_from = date.fromisoformat(parts[2])
             await send_message(
                 callback.chat_id,
-                f"Начало: <b>{date_from:%d.%m.%Y}</b>\nТеперь выберите дату окончания:",
+                _end_date_prompt(date_from),
                 _calendar_markup(report_prefix, "to", date_from.replace(day=1), date_from),
             )
             return
         if action == "month_to" and len(parts) == 4:
             date_from = date.fromisoformat(parts[2])
             month = date.fromisoformat(parts[3] + "-01")
-            await send_message(callback.chat_id, "Выберите <b>дату окончания</b>:", _calendar_markup(report_prefix, "to", month, date_from))
+            await send_message(callback.chat_id, _end_date_prompt(date_from), _calendar_markup(report_prefix, "to", month, date_from))
             return
         if action == "to" and len(parts) == 4:
             date_from = date.fromisoformat(parts[2])

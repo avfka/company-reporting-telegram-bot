@@ -245,6 +245,63 @@ def test_sks_callback_runs_selected_period() -> None:
     assert generated == [(9, "2026-07-01", "2026-07-31")]
 
 
+def test_end_date_calendar_uses_wide_single_line_prompt() -> None:
+    sent = []
+
+    async def send(chat_id, text, reply_markup=None):
+        sent.append((chat_id, text, reply_markup))
+
+    async def answer(callback_query_id):
+        pass
+
+    async def send_sks(chat_id, date_from, date_to):
+        raise AssertionError("should wait for an end date")
+
+    asyncio.run(
+        handle_callback(
+            IncomingCallback("callback-wide", 9, 42, "sks:from:2026-08-07"),
+            settings(),
+            send,
+            answer,
+            send_sks,
+        )
+    )
+
+    assert len(sent) == 1
+    assert "\n" not in sent[0][1]
+    assert sent[0][1] == (
+        "Дата начала отчёта: <b>07.08.2026</b> · "
+        "Выберите дату окончания отчётного периода:"
+    )
+    assert len(sent[0][2]["inline_keyboard"][1]) == 7
+
+
+def test_end_date_calendar_keeps_wide_prompt_when_switching_month() -> None:
+    sent = []
+
+    async def send(chat_id, text, reply_markup=None):
+        sent.append((text, reply_markup))
+
+    async def answer(callback_query_id):
+        pass
+
+    async def send_sks(chat_id, date_from, date_to):
+        raise AssertionError("should wait for an end date")
+
+    asyncio.run(
+        handle_callback(
+            IncomingCallback("callback-month", 9, 42, "sks:month_to:2026-08-07:2026-09"),
+            settings(),
+            send,
+            answer,
+            send_sks,
+        )
+    )
+
+    assert sent[0][0].startswith("Дата начала отчёта: <b>07.08.2026</b>")
+    assert sent[0][1]["inline_keyboard"][0][1]["text"] == "Сентябрь 2026"
+
+
 def test_dota_callback_runs_selected_period() -> None:
     generated = []
     answered = []
