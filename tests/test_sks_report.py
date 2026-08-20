@@ -27,14 +27,14 @@ def test_working_seconds_caps_to_workday() -> None:
 
 
 def test_task_query_includes_combined_contract_and_invoice_titles() -> None:
-    contract_match = "normalized_title LIKE '%договор%'"
-    invoice_match = "normalized_title LIKE '%счет%'"
-    invoice_match_with_yo = "normalized_title LIKE '%счёт%'"
+    contract_titles = "('договор', 'договор и счет', 'счет и договор')"
+    all_titles = "('договор', 'договор и счет', 'счет и договор', 'счет')"
 
-    assert TASK_DURATION_SQL.count(contract_match) == 2
-    assert invoice_match in TASK_DURATION_SQL
-    assert invoice_match_with_yo in TASK_DURATION_SQL
-    assert TASK_DURATION_SQL.index(contract_match) < TASK_DURATION_SQL.index("ELSE 'Счет'")
+    assert f"normalized_title IN {contract_titles}" in TASK_DURATION_SQL
+    assert f"normalized_title IN {all_titles}" in TASK_DURATION_SQL
+    assert "regexp_replace(trim(title), '\\s+', ' ', 'g')" in TASK_DURATION_SQL
+    assert "'ё'," in TASK_DURATION_SQL
+    assert "LIKE '%договор%'" not in TASK_DURATION_SQL
 
 
 def test_build_sks_workbook_creates_valid_xlsx_package() -> None:

@@ -149,7 +149,11 @@ ORDER BY paired.target_at, paired.project_id
 TASK_DURATION_SQL = """
 WITH completed_tasks AS (
   SELECT
-    lower(trim(title)) AS normalized_title,
+    replace(
+      lower(regexp_replace(trim(title), '\\s+', ' ', 'g')),
+      'ё',
+      'е'
+    ) AS normalized_title,
     created_at,
     closed_at
   FROM tasks_clone
@@ -162,15 +166,13 @@ WITH completed_tasks AS (
 )
 SELECT
   CASE
-    WHEN normalized_title LIKE '%договор%' THEN 'Договор'
+    WHEN normalized_title IN ('договор', 'договор и счет', 'счет и договор') THEN 'Договор'
     ELSE 'Счет'
   END AS category,
   created_at,
   closed_at
 FROM completed_tasks
-WHERE normalized_title LIKE '%договор%'
-   OR normalized_title LIKE '%счет%'
-   OR normalized_title LIKE '%счёт%'
+WHERE normalized_title IN ('договор', 'договор и счет', 'счет и договор', 'счет')
 ORDER BY closed_at
 """
 
@@ -578,7 +580,7 @@ def _build_task_sheet(workbook: Workbook, data: SksReportData, period: str) -> N
 
     sheet.append([None] * 7)
     note = sheet.append(
-        ["Рабочее время рассчитано по будням 09:00–17:30 (Москва); ночи и выходные исключены. Включены выполненные задачи, название которых содержит «договор», «счет» или «счёт». Комбинированные названия относятся к категории «Договор»." ] + [None] * 6,
+        ["Рабочее время рассчитано по будням 09:00–17:30 (Москва); ночи и выходные исключены. Включены выполненные задачи «Договор», «Счет», «Договор и счет» и «Счет и договор»; регистр, ё/е и лишние пробелы не влияют. Комбинированные названия относятся к категории «Договор»." ] + [None] * 6,
         STYLE["note"],
     )
     sheet.merges.append(f"A{note}:G{note}")
