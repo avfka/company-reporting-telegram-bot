@@ -10,6 +10,7 @@ from reporting_bot.telegram import (
     handle_message,
     parse_callback,
 )
+from reporting_bot.ks_reports import FilterOption, KsFilterOptions
 
 
 def settings() -> Settings:
@@ -346,3 +347,97 @@ def test_parse_callback_reads_chat_and_sender() -> None:
     assert parsed is not None
     assert parsed.chat_id == 9
     assert parsed.user_id == 42
+
+
+def test_reports_ks_shows_four_separate_reports() -> None:
+    sent = []
+
+    async def send(chat_id, text, reply_markup=None):
+        sent.append((text, reply_markup))
+
+    async def run_report(report, parameters):
+        raise AssertionError("should not run")
+
+    asyncio.run(
+        handle_message(
+            IncomingMessage(chat_id=9, user_id=42, text="/reports_ks"),
+            settings(),
+            catalog(),
+            send,
+            run_report,
+        )
+    )
+    buttons = sent[0][1]["inline_keyboard"]
+    assert len(buttons) == 4
+    assert buttons[0][0]["callback_data"].startswith("ks:open:")
+
+
+def test_direct_ks_report_dates_continue_to_filters() -> None:
+    sent = []
+    generated = []
+
+    async def send(chat_id, text, reply_markup=None):
+        sent.append((text, reply_markup))
+
+    async def run_report(report, parameters):
+        raise AssertionError("should not run")
+
+    async def send_ks(*args):
+        generated.append(args)
+
+    async def load_filters(department_token):
+        return KsFilterOptions(
+            departments=(FilterOption("abc123", "КС"),),
+            managers=(),
+            products=(),
+        )
+
+    asyncio.run(
+        handle_message(
+            IncomingMessage(chat_id=9, user_id=42, text="/reports_ks_plan 2026-07-01 2026-07-31"),
+            settings(),
+            catalog(),
+            send,
+            run_report,
+            send_ks_report=send_ks,
+            load_ks_filters=load_filters,
+        )
+    )
+    assert not generated
+    assert "Выберите отдел" in sent[0][0]
+    assert sent[0][1]["inline_keyboard"][0][0]["callback_data"].startswith("ksp:dept:")
+
+
+def test_ks_filter_callback_generates_selected_report() -> None:
+    generated = []
+
+    async def send(chat_id, text, reply_markup=None):
+        pass
+
+    async def answer(callback_query_id):
+        pass
+
+    async def send_sks(chat_id, date_from, date_to):
+        raise AssertionError("should not run SKS")
+
+    async def send_ks(*args):
+        generated.append(args)
+
+    async def load_filters(department_token):
+        return KsFilterOptions((), (), ())
+
+    asyncio.run(
+        handle_callback(
+            IncomingCallback("ks-final", 9, 42, "ksf:compare:20260701:20260731:abc123:def456:fedcba:previous"),
+            settings(),
+            send,
+            answer,
+            send_sks,
+            send_ks_report=send_ks,
+            load_ks_filters=load_filters,
+        )
+    )
+    assert generated[0][1] == "funnel"
+    assert generated[0][2].isoformat() == "2026-07-01"
+    assert generated[0][4].department_token == "abc123"
+    assert generated[0][5] == "previous"

@@ -9,6 +9,7 @@ from typing import Any, Mapping
 from reporting_bot.config import Settings
 from reporting_bot.database import ReportExecutor
 from reporting_bot.dota_report import DotaReportService
+from reporting_bot.ks_reports import KsReportService
 from reporting_bot.reports import ReportCatalog
 from reporting_bot.sks_report import SksReportService
 from reporting_bot.telegram import (
@@ -106,6 +107,7 @@ class ReportingBotApp:
             executor = ReportExecutor(self.settings)
             sks_service = SksReportService(self.settings)
             dota_service = DotaReportService(self.settings)
+            ks_service = KsReportService(self.settings)
 
             async def run_report(report, parameters):
                 return await asyncio.to_thread(executor.run, report, parameters)
@@ -136,6 +138,41 @@ class ReportingBotApp:
                     f"<b>Отчёт ДОТ</b> · {date_from:%d.%m.%Y}–{date_to:%d.%m.%Y}",
                 )
 
+            async def load_ks_filters(department_token):
+                return await asyncio.to_thread(
+                    ks_service.filter_options,
+                    department_token,
+                )
+
+            async def send_ks_report(
+                chat_id,
+                report_kind,
+                date_from,
+                date_to,
+                filters,
+                comparison_mode,
+            ):
+                artifact = await asyncio.to_thread(
+                    ks_service.create,
+                    report_kind,
+                    date_from,
+                    date_to,
+                    filters,
+                    comparison_mode,
+                )
+                await telegram.send_photo(
+                    chat_id,
+                    artifact.chart,
+                    artifact.chart_filename,
+                    artifact.caption,
+                )
+                await telegram.send_document(
+                    chat_id,
+                    artifact.workbook,
+                    artifact.workbook_filename,
+                    artifact.caption,
+                )
+
             if callback is not None:
                 await handle_callback(
                     callback,
@@ -144,6 +181,8 @@ class ReportingBotApp:
                     telegram.answer_callback_query,
                     send_sks_report,
                     send_dota_report,
+                    send_ks_report,
+                    load_ks_filters,
                 )
             elif message is not None:
                 await handle_message(
@@ -154,6 +193,8 @@ class ReportingBotApp:
                     run_report,
                     send_sks_report,
                     send_dota_report,
+                    send_ks_report,
+                    load_ks_filters,
                 )
         except Exception:
             logger.exception("Failed to process Telegram update")

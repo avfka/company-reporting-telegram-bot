@@ -13,10 +13,20 @@ import httpx
 
 from reporting_bot.config import Settings
 from reporting_bot.database import QueryResult
+from reporting_bot.ks_reports import KsFilterOptions, KsFilters
 from reporting_bot.reports import Report, ReportCatalog
 
 
 logger = logging.getLogger(__name__)
+
+
+KS_COMMANDS = {
+    "/reports_ks_plan": ("ksp", "plan", "КС — План-факт"),
+    "/reports_ks_managers": ("ksm", "managers", "КС — Менеджеры"),
+    "/reports_ks_funnel": ("ksf", "funnel", "КС — Воронка"),
+    "/reports_ks_projects": ("ksj", "projects", "КС — Проекты и оплаты"),
+}
+KS_PREFIXES = {prefix: (kind, title) for prefix, kind, title in KS_COMMANDS.values()}
 
 
 class TelegramClient:
@@ -61,6 +71,21 @@ class TelegramClient:
                         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     )
                 },
+            )
+            response.raise_for_status()
+
+    async def send_photo(
+        self,
+        chat_id: int,
+        content: bytes,
+        filename: str,
+        caption: str,
+    ) -> None:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                f"{self._base_url}/sendPhoto",
+                data={"chat_id": str(chat_id), "caption": caption, "parse_mode": "HTML"},
+                files={"photo": (filename, content, "image/png")},
             )
             response.raise_for_status()
 
@@ -140,6 +165,7 @@ def _help_text() -> str:
         "/reports — список доступных отчётов\n"
         "/reports_sks — подробный Excel-отчёт СКС с выбором дат\n"
         "/reports_dota — Excel-отчёт ДОТ по запускам и выпускам\n"
+        "/reports_ks — меню аналитики КС: план-факт, менеджеры, воронка, проекты\n"
         "/run &lt;отчёт&gt; [параметр=значение] — сформировать отчёт\n"
         "/whoami — показать ваш Telegram ID\n"
         "/help — помощь"
@@ -153,6 +179,8 @@ def _report_list(catalog: ReportCatalog) -> str:
         "Excel со сводкой, показателями по специалистам и проектной детализацией. Команда: /reports_sks",
         "\n<code>reports_dota</code> — Отчёт ДОТ по запускам и выпускам",
         "Excel со сводкой, ежедневной динамикой и детализацией проектов. Команда: /reports_dota",
+        "\n<code>reports_ks</code> — Аналитика КС",
+        "Четыре отдельных отчёта с фильтрами, Excel и графиком. Команда: /reports_ks",
     ]
     for report in catalog.all():
         suffix = ""
@@ -191,7 +219,7 @@ def _calendar_markup(
     month: date,
     start: date | None = None,
 ) -> dict[str, Any]:
-    if report_prefix not in {"sks", "dota"}:
+    if report_prefix not in {"sks", "dota", *KS_PREFIXES}:
         raise ValueError("Unknown report prefix")
     if mode not in {"from", "to"}:
         raise ValueError("Unknown calendar mode")
@@ -239,6 +267,101 @@ def _report_entry_markup(report_prefix: str, today: date) -> dict[str, Any]:
             [{"text": "Текущий месяц", "callback_data": f"{report_prefix}:preset:{current_month.isoformat()}:{today.isoformat()}"}],
             [{"text": "Прошлый месяц", "callback_data": f"{report_prefix}:preset:{previous_month.isoformat()}:{previous_month_end.isoformat()}"}],
             [{"text": "Выбрать даты", "callback_data": f"{report_prefix}:month_from:{current_month:%Y-%m}"}],
+        ]
+    }
+
+
+def _ks_menu_markup() -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [{"text": title, "callback_data": f"ks:open:{prefix}"}]
+            for prefix, (_, title) in KS_PREFIXES.items()
+        ]
+    }
+
+
+def _compact_date(value: date) -> str:
+    return value.strftime("%Y%m%d")
+
+
+def _callback_date(value: str) -> date:
+    if "-" in value:
+        return date.fromisoformat(value)
+    return datetime.strptime(value, "%Y%m%d").date()
+
+
+def _button_rows(buttons: list[dict[str, str]], columns: int = 2) -> list[list[dict[str, str]]]:
+    return [buttons[index:index + columns] for index in range(0, len(buttons), columns)]
+
+
+def _ks_department_markup(
+    prefix: str,
+    date_from: date,
+    date_to: date,
+    options: KsFilterOptions,
+) -> dict[str, Any]:
+    start = _compact_date(date_from)
+    end = _compact_date(date_to)
+    buttons = [{"text": "Все отделы", "callback_data": f"{prefix}:dept:{start}:{end}:-"}]
+    buttons.extend(
+        {"text": option.label, "callback_data": f"{prefix}:dept:{start}:{end}:{option.token}"}
+        for option in options.departments
+    )
+    return {"inline_keyboard": _button_rows(buttons)}
+
+
+def _ks_manager_markup(
+    prefix: str,
+    date_from: date,
+    date_to: date,
+    department_token: str,
+    options: KsFilterOptions,
+) -> dict[str, Any]:
+    start = _compact_date(date_from)
+    end = _compact_date(date_to)
+    buttons = [{"text": "Все менеджеры", "callback_data": f"{prefix}:mgr:{start}:{end}:{department_token}:-"}]
+    buttons.extend(
+        {"text": option.label, "callback_data": f"{prefix}:mgr:{start}:{end}:{department_token}:{option.token}"}
+        for option in options.managers
+    )
+    return {"inline_keyboard": _button_rows(buttons)}
+
+
+def _ks_product_markup(
+    prefix: str,
+    date_from: date,
+    date_to: date,
+    department_token: str,
+    manager_token: str,
+    options: KsFilterOptions,
+) -> dict[str, Any]:
+    start = _compact_date(date_from)
+    end = _compact_date(date_to)
+    buttons = [{"text": "Все продукты", "callback_data": f"{prefix}:product:{start}:{end}:{department_token}:{manager_token}:-"}]
+    buttons.extend(
+        {"text": option.label, "callback_data": f"{prefix}:product:{start}:{end}:{department_token}:{manager_token}:{option.token}"}
+        for option in options.products
+    )
+    return {"inline_keyboard": _button_rows(buttons)}
+
+
+def _ks_comparison_markup(
+    prefix: str,
+    date_from: date,
+    date_to: date,
+    department_token: str,
+    manager_token: str,
+    service: str,
+) -> dict[str, Any]:
+    common = (
+        f"{prefix}:compare:{_compact_date(date_from)}:{_compact_date(date_to)}:"
+        f"{department_token}:{manager_token}:{service}"
+    )
+    return {
+        "inline_keyboard": [
+            [{"text": "Предыдущий аналогичный период", "callback_data": common + ":previous"}],
+            [{"text": "Тот же период прошлого года", "callback_data": common + ":year"}],
+            [{"text": "Без сравнения", "callback_data": common + ":none"}],
         ]
     }
 
@@ -330,6 +453,8 @@ async def handle_message(
     run_report: Callable[[Report, Mapping[str, str]], Awaitable[QueryResult]],
     send_sks_report: Callable[[int, date, date], Awaitable[None]] | None = None,
     send_dota_report: Callable[[int, date, date], Awaitable[None]] | None = None,
+    send_ks_report: Callable[[int, str, date, date, KsFilters, str], Awaitable[None]] | None = None,
+    load_ks_filters: Callable[[str], Awaitable[KsFilterOptions]] | None = None,
 ) -> None:
     command = message.text.split(maxsplit=1)[0].split("@", 1)[0].lower()
 
@@ -347,6 +472,39 @@ async def handle_message(
         return
     if command == "/reports":
         await send_message(message.chat_id, _report_list(catalog))
+        return
+    if command in ("/reports_ks", "reports_ks"):
+        await send_message(
+            message.chat_id,
+            "<b>Аналитика КС</b>\n\nВыберите отчёт:",
+            _ks_menu_markup(),
+        )
+        return
+    normalized_ks_command = command if command.startswith("/") else "/" + command
+    if normalized_ks_command in KS_COMMANDS:
+        prefix, report_kind, report_title = KS_COMMANDS[normalized_ks_command]
+        if send_ks_report is None or load_ks_filters is None:
+            await send_message(message.chat_id, "Отчёты КС временно недоступны.")
+            return
+        try:
+            selected = _parse_report_dates(message.text, normalized_ks_command.removeprefix("/"))
+        except ValueError as exc:
+            await send_message(message.chat_id, str(exc))
+            return
+        if selected is None:
+            today = datetime.now(ZoneInfo("Europe/Moscow")).date()
+            await send_message(
+                message.chat_id,
+                f"<b>{report_title}</b>\n\nВыберите период или отправьте даты после команды.",
+                _report_entry_markup(prefix, today),
+            )
+            return
+        options = await load_ks_filters("-")
+        await send_message(
+            message.chat_id,
+            f"<b>{report_title}</b>\n\nВыберите отдел:",
+            _ks_department_markup(prefix, *selected, options),
+        )
         return
     if command in ("/reports_sks", "reports_sks"):
         if send_sks_report is None:
@@ -410,6 +568,8 @@ async def handle_callback(
     answer_callback: Callable[[str], Awaitable[None]],
     send_sks_report: Callable[[int, date, date], Awaitable[None]],
     send_dota_report: Callable[[int, date, date], Awaitable[None]] | None = None,
+    send_ks_report: Callable[[int, str, date, date, KsFilters, str], Awaitable[None]] | None = None,
+    load_ks_filters: Callable[[str], Awaitable[KsFilterOptions]] | None = None,
 ) -> None:
     await answer_callback(callback.callback_query_id)
     if callback.chat_type != "private":
@@ -418,7 +578,19 @@ async def handle_callback(
     if callback.user_id not in settings.allowed_user_ids:
         await send_message(callback.chat_id, "Доступ запрещён. Используйте /whoami и передайте ID администратору.")
         return
-    if not callback.data.startswith(("sks:", "dota:")):
+    if callback.data.startswith("ks:open:"):
+        prefix = callback.data.split(":", 2)[2]
+        if prefix not in KS_PREFIXES:
+            return
+        _, report_title = KS_PREFIXES[prefix]
+        today = datetime.now(ZoneInfo("Europe/Moscow")).date()
+        await send_message(
+            callback.chat_id,
+            f"<b>{report_title}</b>\n\nВыберите период:",
+            _report_entry_markup(prefix, today),
+        )
+        return
+    if not callback.data.startswith(("sks:", "dota:", *(prefix + ":" for prefix in KS_PREFIXES))):
         return
     parts = callback.data.split(":")
     report_prefix = parts[0]
@@ -426,11 +598,18 @@ async def handle_callback(
         report_title = "СКС"
         report_command = "/reports_sks"
         send_report = send_sks_report
-    else:
+    elif report_prefix == "dota":
         report_title = "ДОТ"
         report_command = "/reports_dota"
         send_report = send_dota_report
-    if send_report is None:
+    else:
+        report_kind, report_title = KS_PREFIXES[report_prefix]
+        report_command = next(command for command, values in KS_COMMANDS.items() if values[0] == report_prefix)
+        send_report = None
+        if send_ks_report is None or load_ks_filters is None:
+            await send_message(callback.chat_id, f"Отчёт {report_title} временно недоступен.")
+            return
+    if report_prefix not in KS_PREFIXES and send_report is None:
         await send_message(callback.chat_id, f"Отчёт {report_title} временно недоступен.")
         return
     try:
@@ -440,6 +619,14 @@ async def handle_callback(
         if action == "preset" and len(parts) == 4:
             date_from = date.fromisoformat(parts[2])
             date_to = date.fromisoformat(parts[3])
+            if report_prefix in KS_PREFIXES:
+                options = await load_ks_filters("-")
+                await send_message(
+                    callback.chat_id,
+                    f"<b>{report_title}</b>\n\nВыберите отдел:",
+                    _ks_department_markup(report_prefix, date_from, date_to, options),
+                )
+                return
             await send_message(callback.chat_id, f"Формирую Excel-отчёт {report_title}…")
             await send_report(callback.chat_id, date_from, date_to)
             return
@@ -467,8 +654,62 @@ async def handle_callback(
                 raise ValueError("Дата окончания раньше даты начала.")
             if (date_to - date_from).days > 366:
                 raise ValueError("Максимальный период отчёта — 366 дней.")
+            if report_prefix in KS_PREFIXES:
+                options = await load_ks_filters("-")
+                await send_message(
+                    callback.chat_id,
+                    f"<b>{report_title}</b>\n\nВыберите отдел:",
+                    _ks_department_markup(report_prefix, date_from, date_to, options),
+                )
+                return
             await send_message(callback.chat_id, f"Формирую Excel-отчёт {report_title}…")
             await send_report(callback.chat_id, date_from, date_to)
+            return
+        if report_prefix in KS_PREFIXES and action == "dept" and len(parts) == 5:
+            date_from = _callback_date(parts[2])
+            date_to = _callback_date(parts[3])
+            department_token = parts[4]
+            options = await load_ks_filters(department_token)
+            await send_message(
+                callback.chat_id,
+                "Выберите менеджера:",
+                _ks_manager_markup(report_prefix, date_from, date_to, department_token, options),
+            )
+            return
+        if report_prefix in KS_PREFIXES and action == "mgr" and len(parts) == 6:
+            date_from = _callback_date(parts[2])
+            date_to = _callback_date(parts[3])
+            department_token, manager_token = parts[4:6]
+            options = await load_ks_filters(department_token)
+            await send_message(
+                callback.chat_id,
+                "Выберите продукт:",
+                _ks_product_markup(report_prefix, date_from, date_to, department_token, manager_token, options),
+            )
+            return
+        if report_prefix in KS_PREFIXES and action == "product" and len(parts) == 7:
+            date_from = _callback_date(parts[2])
+            date_to = _callback_date(parts[3])
+            department_token, manager_token, service = parts[4:7]
+            await send_message(
+                callback.chat_id,
+                "Выберите период для сравнения:",
+                _ks_comparison_markup(report_prefix, date_from, date_to, department_token, manager_token, service),
+            )
+            return
+        if report_prefix in KS_PREFIXES and action == "compare" and len(parts) == 8:
+            date_from = _callback_date(parts[2])
+            date_to = _callback_date(parts[3])
+            department_token, manager_token, service, comparison = parts[4:8]
+            await send_message(callback.chat_id, f"Формирую график и Excel-отчёт {report_title}…")
+            await send_ks_report(
+                callback.chat_id,
+                report_kind,
+                date_from,
+                date_to,
+                KsFilters(department_token, manager_token, service),
+                comparison,
+            )
             return
     except (IndexError, ValueError) as exc:
         await send_message(callback.chat_id, f"Не удалось выбрать период: {html.escape(str(exc))}")
