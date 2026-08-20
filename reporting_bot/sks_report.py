@@ -147,21 +147,30 @@ ORDER BY paired.target_at, paired.project_id
 
 
 TASK_DURATION_SQL = """
+WITH completed_tasks AS (
+  SELECT
+    lower(trim(title)) AS normalized_title,
+    created_at,
+    closed_at
+  FROM tasks_clone
+  WHERE done
+    AND created_at IS NOT NULL
+    AND closed_at IS NOT NULL
+    AND closed_at >= CAST(:date_from AS DATE)
+    AND closed_at < CAST(:date_to_exclusive AS DATE)
+    AND closed_at >= created_at
+)
 SELECT
   CASE
-    WHEN lower(trim(title)) = 'договор' THEN 'Договор'
+    WHEN normalized_title LIKE '%договор%' THEN 'Договор'
     ELSE 'Счет'
   END AS category,
   created_at,
   closed_at
-FROM tasks_clone
-WHERE done
-  AND created_at IS NOT NULL
-  AND closed_at IS NOT NULL
-  AND closed_at >= CAST(:date_from AS DATE)
-  AND closed_at < CAST(:date_to_exclusive AS DATE)
-  AND lower(trim(title)) IN ('договор', 'счет', 'счёт')
-  AND closed_at >= created_at
+FROM completed_tasks
+WHERE normalized_title LIKE '%договор%'
+   OR normalized_title LIKE '%счет%'
+   OR normalized_title LIKE '%счёт%'
 ORDER BY closed_at
 """
 
@@ -569,11 +578,11 @@ def _build_task_sheet(workbook: Workbook, data: SksReportData, period: str) -> N
 
     sheet.append([None] * 7)
     note = sheet.append(
-        ["Рабочее время рассчитано по будням 09:00–17:30 (Москва); ночи и выходные исключены. Включены только точные названия «Договор», «Счет» и «Счёт» со статусом выполнено." ] + [None] * 6,
+        ["Рабочее время рассчитано по будням 09:00–17:30 (Москва); ночи и выходные исключены. Включены выполненные задачи, название которых содержит «договор», «счет» или «счёт». Комбинированные названия относятся к категории «Договор»." ] + [None] * 6,
         STYLE["note"],
     )
     sheet.merges.append(f"A{note}:G{note}")
-    sheet.row_heights[note] = 34
+    sheet.row_heights[note] = 46
     sheet.widths = {0: 29, 1: 17, 2: 23, 3: 18, 4: 22, 5: 18, 6: 18}
     sheet.freeze_rows = 4
 

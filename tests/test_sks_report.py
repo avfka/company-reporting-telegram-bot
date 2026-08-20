@@ -6,6 +6,7 @@ from decimal import Decimal
 from reporting_bot.sks_report import (
     ProjectMetric,
     SksReportData,
+    TASK_DURATION_SQL,
     TaskMetric,
     build_sks_workbook,
     working_seconds,
@@ -23,6 +24,17 @@ def test_working_seconds_caps_to_workday() -> None:
         datetime(2026, 7, 6, 8, 0),
         datetime(2026, 7, 6, 18, 0),
     ) == 8.5 * 60 * 60
+
+
+def test_task_query_includes_combined_contract_and_invoice_titles() -> None:
+    contract_match = "normalized_title LIKE '%договор%'"
+    invoice_match = "normalized_title LIKE '%счет%'"
+    invoice_match_with_yo = "normalized_title LIKE '%счёт%'"
+
+    assert TASK_DURATION_SQL.count(contract_match) == 2
+    assert invoice_match in TASK_DURATION_SQL
+    assert invoice_match_with_yo in TASK_DURATION_SQL
+    assert TASK_DURATION_SQL.index(contract_match) < TASK_DURATION_SQL.index("ELSE 'Счет'")
 
 
 def test_build_sks_workbook_creates_valid_xlsx_package() -> None:
