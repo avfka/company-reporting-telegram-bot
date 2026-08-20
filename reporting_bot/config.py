@@ -34,6 +34,7 @@ class Settings:
     statement_timeout_ms: int = 10_000
     connect_timeout_seconds: int = 5
     default_max_rows: int = 50
+    dota_plans_json: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -48,6 +49,7 @@ class Settings:
             statement_timeout_ms=_positive_int("DB_STATEMENT_TIMEOUT_MS", 10_000),
             connect_timeout_seconds=_positive_int("DB_CONNECT_TIMEOUT_SECONDS", 5),
             default_max_rows=_positive_int("DEFAULT_MAX_ROWS", 50),
+            dota_plans_json=os.getenv("DOTA_PLANS_JSON", "").strip(),
         )
 
     @property

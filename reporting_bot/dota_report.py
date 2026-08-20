@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import calendar
+import json
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Iterable, Sequence
+from typing import Iterable, Mapping, Sequence
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import NullPool
@@ -40,6 +42,13 @@ RELEASE_PLANS = {
     "Другие услуги": Decimal("350000"),
 }
 
+DEFAULT_MONTHLY_PLANS = {
+    "2026-08": {
+        "Запуск": LAUNCH_PLANS,
+        "Выпуск": RELEASE_PLANS,
+    }
+}
+
 
 DOTA_EVENTS_SQL = """
 WITH classified AS (
@@ -52,6 +61,7 @@ WITH classified AS (
     p.contract_number,
     p.sale_price,
     p.workplace_count,
+    p.real_workplace_count,
     coalesce(
       to_jsonb(company_row)->>'name',
       to_jsonb(company_row)->>'short_name',
@@ -59,7 +69,15 @@ WITH classified AS (
       '—'
     ) AS company_name,
     concat_ws(' ', manager.last_name, manager.first_name) AS manager,
-    concat_ws(' ', manager_sks.last_name, manager_sks.first_name) AS manager_sks,
+    CASE
+      WHEN manager.group_id = 2 THEN 'ГТО'
+      WHEN manager.role IN ('partnerManager', 'agent') THEN 'ОАП'
+      WHEN manager.role = 'corpManager' THEN 'КАМ'
+      WHEN trim(manager.last_name) IN ('Бурдейная', 'Шергина') THEN 'КАМ'
+      WHEN trim(manager.last_name) = 'Васильева' AND trim(manager.first_name) = 'Татьяна' THEN 'КАМ'
+      WHEN manager.id IS NOT NULL THEN 'ОП'
+      ELSE '—'
+    END AS manager_department,
     concat_ws(' ', owner_user.last_name, owner_user.first_name) AS event_owner,
     CASE
       WHEN p.service IN ('opk', 'opk_eth') THEN 'ОПР'
@@ -71,42 +89,35 @@ WITH classified AS (
     END AS category,
     CASE
       WHEN p.service IN ('opk', 'opk_eth', 'autsorsing', 'suot', 'audit')
-        AND h.previous_step = 'Получить документы'
         AND h.new_step = 'Принять проект'
         THEN 'Запуск'
       WHEN p.service = 'obuchenie'
-        AND h.previous_step = 'Получить оплату'
         AND h.new_step = 'Передать заявку в УЦ'
         THEN 'Запуск'
       WHEN p.service = 'other'
-        AND h.previous_step = 'Получить оплату'
         AND h.new_step = 'Передать специалисту исходные данные'
         THEN 'Запуск'
-      WHEN p.service IN ('opk', 'opk_eth', 'suot', 'audit')
-        AND h.previous_step = 'В работе у эксперта'
+      WHEN p.service IN ('opk', 'opk_eth', 'suot')
         AND h.new_step = 'Согласовать отчет у клиента'
         THEN 'Выпуск'
       WHEN p.service = 'obuchenie'
-        AND h.previous_step = 'Передать заявку в УЦ'
         AND h.new_step = 'Выдать удостоверение Заказчику'
         THEN 'Выпуск'
-      WHEN p.service = 'autsorsing'
-        AND h.previous_step = 'Отправить документы клиенту'
-        AND h.new_step = 'Закрыть проект'
+      WHEN p.service IN ('autsorsing', 'audit')
+        AND h.new_step = 'Подготовить документы'
         THEN 'Выпуск'
       WHEN p.service = 'other'
-        AND h.previous_step = 'Передать документы Заказчику'
-        AND h.new_step = 'Закрыть проект'
+        AND h.new_step = 'Передать документы Заказчику'
         THEN 'Выпуск'
     END AS metric
   FROM projects_steps_history h
   JOIN projects p ON p.id = h.project_id
   LEFT JOIN companies_clone company_row ON company_row.id = p.company_id
   LEFT JOIN users manager ON manager.id = p.manager_id
-  LEFT JOIN users manager_sks ON manager_sks.id = p.manager_sks_id
   LEFT JOIN users owner_user ON owner_user.id = h.owner_id
   WHERE h.created_at >= CAST(:date_from AS DATE)
     AND h.created_at < CAST(:date_to_exclusive AS DATE)
+    AND p.group_id IN (1, 2)
     AND p.service IN ('opk', 'opk_eth', 'autsorsing', 'suot', 'obuchenie', 'audit', 'other')
 ), ranked AS (
   SELECT *, row_number() OVER (
@@ -123,13 +134,16 @@ SELECT
   contract_number,
   company_name,
   manager,
-  manager_sks,
+  manager_department,
   event_owner,
   event_at,
   previous_step,
   new_step,
   coalesce(sale_price, 0) AS sale_price,
-  coalesce(workplace_count, 0) AS workplace_count
+  CASE
+    WHEN metric = 'Выпуск' THEN coalesce(real_workplace_count, 0)
+    ELSE coalesce(workplace_count, 0)
+  END AS workplace_count
 FROM ranked
 WHERE event_rank = 1
 ORDER BY event_at, category, project_id
@@ -144,7 +158,7 @@ class DotaEvent:
     contract_number: str | None
     company_name: str
     manager: str
-    manager_sks: str
+    manager_department: str
     event_owner: str
     event_at: datetime
     previous_step: str
@@ -161,6 +175,10 @@ class DotaReportData:
     previous_date_to: date
     events: tuple[DotaEvent, ...]
     previous_events: tuple[DotaEvent, ...]
+    plans: Mapping[str, Mapping[str, Decimal]] = field(
+        default_factory=lambda: DEFAULT_MONTHLY_PLANS["2026-08"]
+    )
+    plan_month: str | None = "2026-08"
 
 
 class DotaReportService:
@@ -169,15 +187,15 @@ class DotaReportService:
         self._database_url = settings.database_url.replace(
             "postgresql://", "postgresql+psycopg://", 1
         )
+        self._monthly_plans = _parse_monthly_plans(settings.dota_plans_json)
 
     def create(self, date_from: date, date_to: date) -> tuple[bytes, str]:
         if date_to < date_from:
             raise ValueError("Дата окончания не может быть раньше даты начала.")
         if (date_to - date_from).days > 366:
             raise ValueError("Максимальный период отчёта — 366 дней.")
-        duration = (date_to - date_from).days + 1
-        previous_date_to = date_from - timedelta(days=1)
-        previous_date_from = previous_date_to - timedelta(days=duration - 1)
+        previous_date_from = _previous_month_date(date_from)
+        previous_date_to = _previous_month_date(date_to)
         data = self._load(date_from, date_to, previous_date_from, previous_date_to)
         filename = f"Отчет_ДОТ_{date_from.isoformat()}_{date_to.isoformat()}.xlsx"
         return build_dota_workbook(data), filename
@@ -215,6 +233,12 @@ class DotaReportService:
                 previous_date_to=previous_date_to,
                 events=events,
                 previous_events=previous_events,
+                plans=_plans_for_period(self._monthly_plans, date_from, date_to),
+                plan_month=(
+                    date_from.strftime("%Y-%m")
+                    if (date_from.year, date_from.month) == (date_to.year, date_to.month)
+                    else None
+                ),
             )
         finally:
             engine.dispose()
@@ -233,7 +257,7 @@ def _load_events(connection, date_from: date, date_to: date) -> tuple[DotaEvent,
             contract_number=row["contract_number"],
             company_name=str(row["company_name"] or "—"),
             manager=str(row["manager"] or "—"),
-            manager_sks=str(row["manager_sks"] or "—"),
+            manager_department=str(row["manager_department"] or "—"),
             event_owner=str(row["event_owner"] or "—"),
             event_at=row["event_at"],
             previous_step=str(row["previous_step"]),
@@ -243,6 +267,57 @@ def _load_events(connection, date_from: date, date_to: date) -> tuple[DotaEvent,
         )
         for row in connection.execute(text(DOTA_EVENTS_SQL), params).mappings()
     )
+
+
+def _previous_month_date(value: date) -> date:
+    year = value.year
+    month = value.month - 1
+    if month == 0:
+        year -= 1
+        month = 12
+    day = min(value.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def _parse_monthly_plans(
+    raw: str,
+) -> dict[str, dict[str, dict[str, Decimal]]]:
+    result = {
+        month: {
+            metric: {category: Decimal(value) for category, value in values.items()}
+            for metric, values in metrics.items()
+        }
+        for month, metrics in DEFAULT_MONTHLY_PLANS.items()
+    }
+    if not raw:
+        return result
+    try:
+        parsed = json.loads(raw)
+        result.update(
+            {
+                str(month): {
+                    str(metric): {
+                        str(category): Decimal(str(value))
+                        for category, value in values.items()
+                    }
+                    for metric, values in metrics.items()
+                }
+                for month, metrics in parsed.items()
+            }
+        )
+        return result
+    except (json.JSONDecodeError, AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("DOTA_PLANS_JSON должен содержать корректный JSON с месячными планами.") from exc
+
+
+def _plans_for_period(
+    monthly_plans: Mapping[str, Mapping[str, Mapping[str, Decimal]]],
+    date_from: date,
+    date_to: date,
+) -> Mapping[str, Mapping[str, Decimal]]:
+    if (date_from.year, date_from.month) != (date_to.year, date_to.month):
+        return {}
+    return monthly_plans.get(date_from.strftime("%Y-%m"), {})
 
 
 def build_dota_workbook(data: DotaReportData) -> bytes:
@@ -292,7 +367,7 @@ def _sum_amount(rows: Iterable[DotaEvent]) -> Decimal:
     return sum((row.amount for row in rows), Decimal(0))
 
 
-def _ratio(actual: Decimal | int, baseline: Decimal | int) -> float | None:
+def _ratio(actual: Decimal | int, baseline: Decimal | int | None) -> float | None:
     if not baseline:
         return None
     return float(actual) / float(baseline)
@@ -310,7 +385,8 @@ def _build_summary_sheet(workbook: Workbook, data: DotaReportData, period: str) 
     _title(sheet, "Отчёт ДОТ", period, columns)
     sheet.append([None] * columns)
 
-    for metric, plans in (("Запуск", LAUNCH_PLANS), ("Выпуск", RELEASE_PLANS)):
+    for metric in ("Запуск", "Выпуск"):
+        plans = data.plans.get(metric, {})
         section_row = sheet.append([metric.upper()] + [None] * (columns - 1), STYLE["section"])
         sheet.merges.append(f"A{section_row}:J{section_row}")
         sheet.append(
@@ -333,12 +409,12 @@ def _build_summary_sheet(workbook: Workbook, data: DotaReportData, period: str) 
             previous = _events(data.previous_events, metric, category)
             amount = _sum_amount(current)
             previous_amount = _sum_amount(previous)
-            plan = plans[category]
+            plan = plans.get(category)
             average = amount / len(current) if current else Decimal(0)
             sheet.append(
                 [
                     category,
-                    plan,
+                    plan if plan is not None else "—",
                     amount,
                     _ratio(amount, plan),
                     previous_amount,
@@ -346,7 +422,7 @@ def _build_summary_sheet(workbook: Workbook, data: DotaReportData, period: str) 
                     len(current),
                     len(previous),
                     average,
-                    max(plan - amount, Decimal(0)),
+                    max(plan - amount, Decimal(0)) if plan is not None else "—",
                 ],
                 [
                     STYLE["table_text"],
@@ -364,13 +440,14 @@ def _build_summary_sheet(workbook: Workbook, data: DotaReportData, period: str) 
 
         current_all = _events(data.events, metric)
         previous_all = _events(data.previous_events, metric)
-        total_plan = sum(plans.values(), Decimal(0))
+        has_complete_plan = all(category in plans for category in CATEGORIES)
+        total_plan = sum((plans[category] for category in CATEGORIES), Decimal(0)) if has_complete_plan else None
         total_amount = _sum_amount(current_all)
         previous_total = _sum_amount(previous_all)
         sheet.append(
             [
                 "Итого",
-                total_plan,
+                total_plan if total_plan is not None else "—",
                 total_amount,
                 _ratio(total_amount, total_plan),
                 previous_total,
@@ -378,7 +455,7 @@ def _build_summary_sheet(workbook: Workbook, data: DotaReportData, period: str) 
                 len(current_all),
                 len(previous_all),
                 total_amount / len(current_all) if current_all else Decimal(0),
-                max(total_plan - total_amount, Decimal(0)),
+                max(total_plan - total_amount, Decimal(0)) if total_plan is not None else "—",
             ],
             [
                 STYLE["total_text"],
@@ -395,17 +472,22 @@ def _build_summary_sheet(workbook: Workbook, data: DotaReportData, period: str) 
         )
         sheet.append([None] * columns)
 
+    plan_note = (
+        f"План: {data.plan_month}, полный месяц. "
+        if data.plan_month and data.plans
+        else "План для выбранного периода не настроен. "
+    )
     note_row = sheet.append(
         [
-            "Планы перенесены из образца за август 2026 и применяются к выбранному периоду без пересчёта. "
-            f"Предыдущий сопоставимый период: {data.previous_date_from:%d.%m.%Y}–{data.previous_date_to:%d.%m.%Y}. "
-            "Повторный одинаковый переход одного проекта внутри периода учитывается один раз.",
+            plan_note
+            + f"Сравнение: {data.previous_date_from:%d.%m.%Y}–{data.previous_date_to:%d.%m.%Y}. "
+            + "Повтор проекта по одному показателю не учитывается.",
         ]
         + [None] * (columns - 1),
         STYLE["note"],
     )
     sheet.merges.append(f"A{note_row}:J{note_row}")
-    sheet.row_heights[note_row] = 42
+    sheet.row_heights[note_row] = 58
     sheet.widths = {
         0: 22,
         1: 17,
@@ -429,13 +511,16 @@ def _build_daily_sheet(
     date_to: date,
     period: str,
 ) -> None:
-    columns = 2 + len(CATEGORIES) * 2 + 1
+    columns = 1 + len(CATEGORIES) * 2 + 1 + 2
     sheet = workbook.add_sheet(title)
     _title(sheet, title, period, columns)
     sheet.append([None] * columns)
     headers = ["Дата"]
     for category in CATEGORIES:
-        headers.extend([f"{category}, руб.", f"{category}, шт."])
+        headers.append(f"{category}, руб.")
+        if category == "ОПР":
+            headers.append("ОПР, РМ факт" if title == "Выпуск" else "ОПР, РМ")
+        headers.append(f"{category}, шт.")
     headers.extend(["Всего, руб.", "Всего, шт."])
     sheet.append(headers, STYLE["table_header"])
 
@@ -453,8 +538,13 @@ def _build_daily_sheet(
             category_rows = by_day[current].get(category, [])
             amount = _sum_amount(category_rows)
             count = len(category_rows)
-            values.extend([amount, count])
-            styles.extend([STYLE["table_money"], STYLE["table_number"]])
+            values.append(amount)
+            styles.append(STYLE["table_money"])
+            if category == "ОПР":
+                values.append(sum(row.workplace_count for row in category_rows))
+                styles.append(STYLE["table_number"])
+            values.append(count)
+            styles.append(STYLE["table_number"])
             day_amount += amount
             day_count += count
         values.extend([day_amount, day_count])
@@ -466,14 +556,19 @@ def _build_daily_sheet(
     total_styles = [STYLE["total_text"]]
     for category in CATEGORIES:
         category_rows = [row for row in rows if row.category == category]
-        totals.extend([_sum_amount(category_rows), len(category_rows)])
-        total_styles.extend([STYLE["total_money"], STYLE["total_number"]])
+        totals.append(_sum_amount(category_rows))
+        total_styles.append(STYLE["total_money"])
+        if category == "ОПР":
+            totals.append(sum(row.workplace_count for row in category_rows))
+            total_styles.append(STYLE["total_number"])
+        totals.append(len(category_rows))
+        total_styles.append(STYLE["total_number"])
     totals.extend([_sum_amount(rows), len(rows)])
     total_styles.extend([STYLE["total_money"], STYLE["total_number"]])
     sheet.append(totals, total_styles)
     sheet.widths = {0: 14}
-    for index in range(1, columns):
-        sheet.widths[index] = 16 if index % 2 else 13
+    for index, header in enumerate(headers[1:], start=1):
+        sheet.widths[index] = 17 if "руб." in header else 14
     sheet.freeze_rows = 4
     sheet.auto_filter = f"A4:{_excel_column(columns)}{max(4, len(sheet.rows) - 1)}"
 
@@ -484,7 +579,7 @@ def _build_detail_sheet(
     rows: Sequence[DotaEvent],
     period: str,
 ) -> None:
-    columns = 12
+    columns = 11
     sheet = workbook.add_sheet(title)
     _title(sheet, title, period, columns)
     sheet.append([None] * columns)
@@ -495,12 +590,11 @@ def _build_detail_sheet(
             "Договор",
             "Компания",
             "Менеджер",
-            "Специалист СКС",
+            "Отдел менеджера",
             "Дата события",
             "Стоимость, руб.",
-            "РМ",
-            "Предыдущий этап",
-            "Новый этап",
+            "РМ факт" if title == "Детали выпуска" else "РМ",
+            "Этап выпуска" if title == "Детали выпуска" else "Этап запуска",
             "Изменил этап",
         ],
         STYLE["table_header"],
@@ -513,11 +607,10 @@ def _build_detail_sheet(
                 row.contract_number or "—",
                 row.company_name,
                 row.manager,
-                row.manager_sks,
+                row.manager_department,
                 row.event_at,
                 row.amount,
                 row.workplace_count,
-                row.previous_step,
                 row.new_step,
                 row.event_owner,
             ],
@@ -533,7 +626,6 @@ def _build_detail_sheet(
                 STYLE["table_number"],
                 STYLE["table_text"],
                 STYLE["table_text"],
-                STYLE["table_text"],
             ],
         )
     sheet.widths = {
@@ -542,13 +634,12 @@ def _build_detail_sheet(
         2: 22,
         3: 39,
         4: 28,
-        5: 28,
+        5: 19,
         6: 21,
         7: 20,
         8: 10,
-        9: 31,
-        10: 34,
-        11: 27,
+        9: 34,
+        10: 27,
     }
     sheet.freeze_rows = 4
-    sheet.auto_filter = f"A4:L{max(4, len(sheet.rows))}"
+    sheet.auto_filter = f"A4:K{max(4, len(sheet.rows))}"
