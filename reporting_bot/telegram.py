@@ -3,6 +3,7 @@ from __future__ import annotations
 import calendar
 import html
 import logging
+import re
 import shlex
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -105,6 +106,7 @@ class IncomingMessage:
     user_id: int
     text: str
     chat_type: str = "private"
+    reply_to_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -131,6 +133,11 @@ def parse_message(update: Mapping[str, Any]) -> IncomingMessage | None:
             user_id=int(sender["id"]),
             text=text_value.strip(),
             chat_type=str(chat.get("type", "")),
+            reply_to_text=(
+                str(message["reply_to_message"].get("text", ""))
+                if isinstance(message.get("reply_to_message"), Mapping)
+                else None
+            ),
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -316,15 +323,25 @@ def _ks_manager_markup(
     date_from: date,
     date_to: date,
     department_token: str,
+    service: str,
+    comparison: str,
     options: KsFilterOptions,
 ) -> dict[str, Any]:
     start = _compact_date(date_from)
     end = _compact_date(date_to)
-    buttons = [{"text": "Все менеджеры", "callback_data": f"{prefix}:mgr:{start}:{end}:{department_token}:-"}]
-    buttons.extend(
-        {"text": option.label, "callback_data": f"{prefix}:mgr:{start}:{end}:{department_token}:{option.token}"}
-        for option in options.managers
-    )
+    common = f"{prefix}:go:{start}:{end}:{department_token}:{service}:{comparison}"
+    buttons = [
+        {"text": "Все менеджеры", "callback_data": common + ":-"},
+        {
+            "text": "✍️ Ввести несколько менеджеров",
+            "callback_data": f"{prefix}:mm:{start}:{end}:{department_token}:{service}:{comparison}",
+        },
+    ]
+    if department_token != "-":
+        buttons.extend(
+            {"text": option.label, "callback_data": common + f":{option.token}"}
+            for option in options.managers
+        )
     return {"inline_keyboard": _button_rows(buttons)}
 
 
@@ -333,14 +350,13 @@ def _ks_product_markup(
     date_from: date,
     date_to: date,
     department_token: str,
-    manager_token: str,
     options: KsFilterOptions,
 ) -> dict[str, Any]:
     start = _compact_date(date_from)
     end = _compact_date(date_to)
-    buttons = [{"text": "Все продукты", "callback_data": f"{prefix}:product:{start}:{end}:{department_token}:{manager_token}:-"}]
+    buttons = [{"text": "Все продукты", "callback_data": f"{prefix}:pr:{start}:{end}:{department_token}:-"}]
     buttons.extend(
-        {"text": option.label, "callback_data": f"{prefix}:product:{start}:{end}:{department_token}:{manager_token}:{option.token}"}
+        {"text": option.label, "callback_data": f"{prefix}:pr:{start}:{end}:{department_token}:{option.token}"}
         for option in options.products
     )
     return {"inline_keyboard": _button_rows(buttons)}
@@ -351,20 +367,87 @@ def _ks_comparison_markup(
     date_from: date,
     date_to: date,
     department_token: str,
-    manager_token: str,
     service: str,
 ) -> dict[str, Any]:
     common = (
-        f"{prefix}:compare:{_compact_date(date_from)}:{_compact_date(date_to)}:"
-        f"{department_token}:{manager_token}:{service}"
+        f"{prefix}:co:{_compact_date(date_from)}:{_compact_date(date_to)}:"
+        f"{department_token}:{service}"
     )
     return {
         "inline_keyboard": [
-            [{"text": "Предыдущий аналогичный период", "callback_data": common + ":previous"}],
-            [{"text": "Тот же период прошлого года", "callback_data": common + ":year"}],
-            [{"text": "Без сравнения", "callback_data": common + ":none"}],
+            [{"text": "Предыдущий аналогичный период", "callback_data": common + ":p"}],
+            [{"text": "Тот же период прошлого года", "callback_data": common + ":y"}],
+            [{"text": "Без сравнения", "callback_data": common + ":n"}],
         ]
     }
+
+
+def _ks_manual_manager_prompt(
+    prefix: str,
+    date_from: date,
+    date_to: date,
+    department_token: str,
+    service: str,
+    comparison: str,
+    error: str | None = None,
+) -> tuple[str, dict[str, Any]]:
+    marker = (
+        f"KSM|{prefix}|{_compact_date(date_from)}|{_compact_date(date_to)}|"
+        f"{department_token}|{service}|{comparison}"
+    )
+    heading = f"{html.escape(error)}\n\n" if error else ""
+    text_value = (
+        heading
+        + "Введите ФИО менеджеров через запятую или каждое с новой строки.\n"
+        + "Например: <code>Иванова Елена, Максимович Анастасия</code>\n\n"
+        + f"Код выбора: <code>{marker}</code>"
+    )
+    return text_value, {
+        "force_reply": True,
+        "selective": True,
+        "input_field_placeholder": "Фамилия Имя, Фамилия Имя",
+    }
+
+
+def _manual_manager_context(reply_to_text: str | None) -> tuple[str, date, date, str, str, str] | None:
+    if not reply_to_text:
+        return None
+    match = re.search(
+        r"KSM\|(ksa|ksp|ksm|ksf|ksj)\|(\d{8})\|(\d{8})\|([a-f0-9-]+)\|([a-f0-9-]+)\|([pyn])",
+        reply_to_text,
+    )
+    if match is None:
+        return None
+    prefix, start, end, department_token, service, comparison = match.groups()
+    return prefix, _callback_date(start), _callback_date(end), department_token, service, comparison
+
+
+def _resolve_manager_tokens(raw_names: str, options: KsFilterOptions) -> str:
+    names = [
+        " ".join(value.split())
+        for value in re.split(r"[,;\n]+", raw_names)
+        if value.strip()
+    ]
+    if not names:
+        raise ValueError("Не указано ни одного менеджера.")
+    if len(names) > 10:
+        raise ValueError("За один раз можно выбрать не более 10 менеджеров.")
+
+    def normalized(value: str) -> str:
+        return " ".join(value.casefold().replace("ё", "е").split())
+
+    by_name = {normalized(option.label): option.token for option in options.managers}
+    tokens: list[str] = []
+    missing: list[str] = []
+    for name in names:
+        token = by_name.get(normalized(name))
+        if token is None:
+            missing.append(name)
+        elif token not in tokens:
+            tokens.append(token)
+    if missing:
+        raise ValueError("Не найдены менеджеры: " + ", ".join(missing) + ". Проверьте ФИО.")
+    return ",".join(tokens)
 
 
 def _parse_report_dates(text_value: str, command_name: str) -> tuple[date, date] | None:
@@ -467,6 +550,39 @@ async def handle_message(
         return
     if message.user_id not in settings.allowed_user_ids:
         await send_message(message.chat_id, "Доступ запрещён. Передайте администратору ID из команды /whoami.")
+        return
+    manual_context = _manual_manager_context(message.reply_to_text)
+    if manual_context is not None:
+        if send_ks_report is None or load_ks_filters is None:
+            await send_message(message.chat_id, "Отчёты КС временно недоступны.")
+            return
+        prefix, date_from, date_to, department_token, service, comparison_code = manual_context
+        report_kind, report_title = KS_PREFIXES[prefix]
+        comparison = {"p": "previous", "y": "year", "n": "none"}[comparison_code]
+        options = await load_ks_filters(department_token)
+        try:
+            manager_token = _resolve_manager_tokens(message.text, options)
+        except ValueError as exc:
+            prompt, reply_markup = _ks_manual_manager_prompt(
+                prefix,
+                date_from,
+                date_to,
+                department_token,
+                service,
+                comparison_code,
+                str(exc),
+            )
+            await send_message(message.chat_id, prompt, reply_markup)
+            return
+        await send_message(message.chat_id, f"Формирую график и Excel-отчёт {report_title}…")
+        await send_ks_report(
+            message.chat_id,
+            report_kind,
+            date_from,
+            date_to,
+            KsFilters(department_token, manager_token, service),
+            comparison,
+        )
         return
     if command in ("/start", "/help"):
         await send_message(message.chat_id, _help_text())
@@ -673,35 +789,62 @@ async def handle_callback(
             options = await load_ks_filters(department_token)
             await send_message(
                 callback.chat_id,
-                "Выберите менеджера:",
-                _ks_manager_markup(report_prefix, date_from, date_to, department_token, options),
-            )
-            return
-        if report_prefix in KS_PREFIXES and action == "mgr" and len(parts) == 6:
-            date_from = _callback_date(parts[2])
-            date_to = _callback_date(parts[3])
-            department_token, manager_token = parts[4:6]
-            options = await load_ks_filters(department_token)
-            await send_message(
-                callback.chat_id,
                 "Выберите продукт:",
-                _ks_product_markup(report_prefix, date_from, date_to, department_token, manager_token, options),
+                _ks_product_markup(report_prefix, date_from, date_to, department_token, options),
             )
             return
-        if report_prefix in KS_PREFIXES and action == "product" and len(parts) == 7:
+        if report_prefix in KS_PREFIXES and action == "pr" and len(parts) == 6:
             date_from = _callback_date(parts[2])
             date_to = _callback_date(parts[3])
-            department_token, manager_token, service = parts[4:7]
+            department_token, service = parts[4:6]
             await send_message(
                 callback.chat_id,
                 "Выберите период для сравнения:",
-                _ks_comparison_markup(report_prefix, date_from, date_to, department_token, manager_token, service),
+                _ks_comparison_markup(report_prefix, date_from, date_to, department_token, service),
             )
             return
-        if report_prefix in KS_PREFIXES and action == "compare" and len(parts) == 8:
+        if report_prefix in KS_PREFIXES and action == "co" and len(parts) == 7:
             date_from = _callback_date(parts[2])
             date_to = _callback_date(parts[3])
-            department_token, manager_token, service, comparison = parts[4:8]
+            department_token, service, comparison = parts[4:7]
+            if comparison not in {"p", "y", "n"}:
+                raise ValueError("Неизвестный период сравнения.")
+            options = await load_ks_filters(department_token)
+            await send_message(
+                callback.chat_id,
+                "Выберите одного менеджера или введите несколько вручную:",
+                _ks_manager_markup(
+                    report_prefix,
+                    date_from,
+                    date_to,
+                    department_token,
+                    service,
+                    comparison,
+                    options,
+                ),
+            )
+            return
+        if report_prefix in KS_PREFIXES and action == "mm" and len(parts) == 7:
+            date_from = _callback_date(parts[2])
+            date_to = _callback_date(parts[3])
+            department_token, service, comparison = parts[4:7]
+            prompt, reply_markup = _ks_manual_manager_prompt(
+                report_prefix,
+                date_from,
+                date_to,
+                department_token,
+                service,
+                comparison,
+            )
+            await send_message(callback.chat_id, prompt, reply_markup)
+            return
+        if report_prefix in KS_PREFIXES and action == "go" and len(parts) == 8:
+            date_from = _callback_date(parts[2])
+            date_to = _callback_date(parts[3])
+            department_token, service, comparison_code, manager_token = parts[4:8]
+            comparison = {"p": "previous", "y": "year", "n": "none"}.get(comparison_code)
+            if comparison is None:
+                raise ValueError("Неизвестный период сравнения.")
             await send_message(callback.chat_id, f"Формирую график и Excel-отчёт {report_title}…")
             await send_ks_report(
                 callback.chat_id,
@@ -713,6 +856,6 @@ async def handle_callback(
             )
             return
     except (IndexError, ValueError) as exc:
-        await send_message(callback.chat_id, f"Не удалось выбрать период: {html.escape(str(exc))}")
+        await send_message(callback.chat_id, f"Не удалось применить выбор: {html.escape(str(exc))}")
         return
     await send_message(callback.chat_id, f"Не удалось распознать выбор. Отправьте {report_command} ещё раз.")

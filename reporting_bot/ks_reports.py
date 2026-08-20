@@ -173,7 +173,7 @@ WHERE r.group_id = 1
   AND r.archived_at IS NULL
   AND coalesce(r.status, '') NOT IN ('Не лид', 'Дубль')
   AND (:department_token = '-' OR left(replace(coalesce(d.id::text, ''), '-', ''), 6) = :department_token)
-  AND (:manager_token = '-' OR left(replace(coalesce(r.manager_id::text, ''), '-', ''), 6) = :manager_token)
+  AND (:manager_token = '-' OR left(replace(coalesce(r.manager_id::text, ''), '-', ''), 6) = ANY(string_to_array(:manager_token, ',')))
   AND (:service = '-' OR left(md5(lower(coalesce(r.service, ''))), 6) = :service)
 ORDER BY r.created_at, r.id
 LIMIT 10000
@@ -204,7 +204,7 @@ WHERE o.is_sent IS TRUE
   AND o.created_at >= CAST(:date_from AS DATE)
   AND o.created_at < CAST(:date_to_exclusive AS DATE)
   AND (:department_token = '-' OR left(replace(coalesce(d.id::text, ''), '-', ''), 6) = :department_token)
-  AND (:manager_token = '-' OR left(replace(coalesce(coalesce(o.user_id, r.manager_id)::text, ''), '-', ''), 6) = :manager_token)
+  AND (:manager_token = '-' OR left(replace(coalesce(coalesce(o.user_id, r.manager_id)::text, ''), '-', ''), 6) = ANY(string_to_array(:manager_token, ',')))
   AND (:service = '-' OR left(md5(lower(coalesce(nullif(o.service, ''), r.service, ''))), 6) = :service)
 ORDER BY o.request_id, o.created_at, o.id
 LIMIT 10000
@@ -236,7 +236,7 @@ WHERE p.group_id = 1
   AND p.created_at >= CAST(:date_from AS DATE)
   AND p.created_at < CAST(:date_to_exclusive AS DATE)
   AND (:department_token = '-' OR left(replace(coalesce(d.id::text, ''), '-', ''), 6) = :department_token)
-  AND (:manager_token = '-' OR left(replace(coalesce(p.manager_id::text, ''), '-', ''), 6) = :manager_token)
+  AND (:manager_token = '-' OR left(replace(coalesce(p.manager_id::text, ''), '-', ''), 6) = ANY(string_to_array(:manager_token, ',')))
   AND (:service = '-' OR left(md5(lower(coalesce(p.service, ''))), 6) = :service)
 ORDER BY p.created_at, p.id
 LIMIT 10000
@@ -269,7 +269,7 @@ WHERE pay.group_id = 1
   AND pay."chargeAt" >= CAST(:date_from AS DATE)
   AND pay."chargeAt" < CAST(:date_to_exclusive AS DATE)
   AND (:department_token = '-' OR left(replace(coalesce(d.id::text, ''), '-', ''), 6) = :department_token)
-  AND (:manager_token = '-' OR left(replace(coalesce(coalesce(p.manager_id, pay."userId")::text, ''), '-', ''), 6) = :manager_token)
+  AND (:manager_token = '-' OR left(replace(coalesce(coalesce(p.manager_id, pay."userId")::text, ''), '-', ''), 6) = ANY(string_to_array(:manager_token, ',')))
   AND (:service = '-' OR left(md5(lower(coalesce(p.service, ''))), 6) = :service)
 ORDER BY pay."chargeAt", pay.id
 LIMIT 10000
@@ -298,7 +298,7 @@ LEFT JOIN LATERAL (
 WHERE c.call_date >= CAST(:date_from AS DATE)
   AND c.call_date < CAST(:date_to_exclusive AS DATE)
   AND (:department_token = '-' OR left(replace(coalesce(d.id::text, ''), '-', ''), 6) = :department_token)
-  AND (:manager_token = '-' OR left(replace(c.user_id::text, '-', ''), 6) = :manager_token)
+  AND (:manager_token = '-' OR left(replace(c.user_id::text, '-', ''), 6) = ANY(string_to_array(:manager_token, ',')))
   AND :service = '-'
 ORDER BY c.call_date, c.id
 LIMIT 10000
@@ -322,16 +322,12 @@ class KsReportService:
                         FilterOption(str(row["token"]), str(row["label"]))
                         for row in connection.execute(text(DEPARTMENT_OPTIONS_SQL)).mappings()
                     )
-                    managers = (
-                        tuple(
-                            FilterOption(str(row["token"]), str(row["label"] or "Без имени"))
-                            for row in connection.execute(
-                                text(MANAGER_OPTIONS_SQL),
-                                {"department_token": department_token},
-                            ).mappings()
-                        )
-                        if department_token != "-"
-                        else ()
+                    managers = tuple(
+                        FilterOption(str(row["token"]), str(row["label"] or "Без имени"))
+                        for row in connection.execute(
+                            text(MANAGER_OPTIONS_SQL),
+                            {"department_token": department_token},
+                        ).mappings()
                     )
                     products = tuple(
                         FilterOption(str(row["token"]), _service_label(str(row["label"])))
@@ -439,15 +435,11 @@ def _load_filter_options(connection, department_token: str) -> KsFilterOptions:
         FilterOption(str(row["token"]), str(row["label"]))
         for row in connection.execute(text(DEPARTMENT_OPTIONS_SQL)).mappings()
     )
-    managers = (
-        tuple(
-            FilterOption(str(row["token"]), str(row["label"] or "Без имени"))
-            for row in connection.execute(
-                text(MANAGER_OPTIONS_SQL), {"department_token": department_token}
-            ).mappings()
-        )
-        if department_token != "-"
-        else ()
+    managers = tuple(
+        FilterOption(str(row["token"]), str(row["label"] or "Без имени"))
+        for row in connection.execute(
+            text(MANAGER_OPTIONS_SQL), {"department_token": department_token}
+        ).mappings()
     )
     products = tuple(
         FilterOption(str(row["token"]), _service_label(str(row["label"])))
@@ -461,7 +453,12 @@ def _option_label(
 ) -> str:
     if token == "-":
         return default
-    return next((option.label for option in options if option.token == token), token)
+    labels_by_token = {option.token: option.label for option in options}
+    return ", ".join(
+        labels_by_token.get(value, value)
+        for value in token.split(",")
+        if value
+    )
 
 
 def _load_events(

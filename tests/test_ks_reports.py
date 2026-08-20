@@ -82,3 +82,9 @@ def test_product_filter_uses_compact_hash_token() -> None:
     from reporting_bot.ks_reports import PROJECTS_SQL
 
     assert "left(md5(lower(coalesce(p.service, ''))), 6)" in PROJECTS_SQL
+
+
+def test_manager_filter_accepts_multiple_compact_tokens() -> None:
+    from reporting_bot.ks_reports import PROJECTS_SQL
+
+    assert "ANY(string_to_array(:manager_token, ','))" in PROJECTS_SQL
