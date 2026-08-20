@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import base64
 import io
 import math
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from functools import lru_cache
+from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
@@ -18,6 +21,7 @@ from reporting_bot.simple_xlsx import STYLE, Workbook
 
 
 REPORT_TITLES = {
+    "all": "КС — Общий отчёт",
     "plan": "КС — План-факт",
     "managers": "КС — Менеджеры",
     "funnel": "КС — Воронка",
@@ -590,7 +594,9 @@ def _forecast(value: Decimal, date_from: date, date_to: date) -> Decimal:
 
 def build_ks_workbook(data: KsReportData) -> bytes:
     workbook = Workbook(REPORT_TITLES[data.report_kind])
-    if data.report_kind == "plan":
+    if data.report_kind == "all":
+        _build_all_workbook(workbook, data)
+    elif data.report_kind == "plan":
         _build_plan_workbook(workbook, data)
     elif data.report_kind == "managers":
         _build_managers_workbook(workbook, data)
@@ -637,11 +643,17 @@ def _title(sheet, title: str, data: KsReportData, columns: int) -> None:
     sheet.row_heights.update({1: 28, 2: 22, 3: 22, 4: 22})
 
 
-def _build_plan_workbook(workbook: Workbook, data: KsReportData) -> None:
+def _build_plan_workbook(
+    workbook: Workbook,
+    data: KsReportData,
+    *,
+    sheet_name: str = "Сводка",
+    include_support: bool = True,
+) -> None:
     current = _metrics(data.events)
     previous = _metrics(data.comparison_events)
-    sheet = workbook.add_sheet("Сводка")
-    _title(sheet, REPORT_TITLES["plan"], data, 8)
+    sheet = workbook.add_sheet(sheet_name)
+    _title(sheet, REPORT_TITLES[data.report_kind], data, 8)
     sheet.append([None] * 8)
     sheet.append(
         ["Показатель", "План-ориентир", "Факт", "% выполнения", "Прогноз", "Пред. период", "Изменение", "Единица"],
@@ -673,9 +685,10 @@ def _build_plan_workbook(workbook: Workbook, data: KsReportData) -> None:
     sheet.widths = {0: 27, 1: 20, 2: 18, 3: 18, 4: 18, 5: 18, 6: 16, 7: 12}
     sheet.freeze_rows = 6
 
-    _build_dimension_sheet(workbook, data, "По отделам", "department")
-    _build_dimension_sheet(workbook, data, "По продуктам", "service")
-    _build_detail_sheet(workbook, data, data.events)
+    if include_support:
+        _build_dimension_sheet(workbook, data, "По отделам", "department")
+        _build_dimension_sheet(workbook, data, "По продуктам", "service")
+        _build_detail_sheet(workbook, data, data.events)
 
 
 def _dimension_rows(events: Sequence[KsEvent], field: str) -> dict[str, list[KsEvent]]:
@@ -723,7 +736,12 @@ def _manager_groups(events: Sequence[KsEvent]) -> dict[str, list[KsEvent]]:
     return _dimension_rows(events, "manager")
 
 
-def _build_managers_workbook(workbook: Workbook, data: KsReportData) -> None:
+def _build_managers_workbook(
+    workbook: Workbook,
+    data: KsReportData,
+    *,
+    include_detail: bool = True,
+) -> None:
     sheet = workbook.add_sheet("Менеджеры")
     _title(sheet, REPORT_TITLES["managers"], data, 10)
     sheet.append([None] * 10)
@@ -746,7 +764,8 @@ def _build_managers_workbook(workbook: Workbook, data: KsReportData) -> None:
     sheet.freeze_rows = 6
     if len(sheet.rows) > 6:
         sheet.auto_filter = f"A6:J{len(sheet.rows)}"
-    _build_detail_sheet(workbook, data, data.events)
+    if include_detail:
+        _build_detail_sheet(workbook, data, data.events)
 
 
 def _funnel_counts(events: Sequence[KsEvent]) -> dict[str, int]:
@@ -784,7 +803,12 @@ def _planned_funnel(data: KsReportData) -> dict[str, int]:
     }
 
 
-def _build_funnel_workbook(workbook: Workbook, data: KsReportData) -> None:
+def _build_funnel_workbook(
+    workbook: Workbook,
+    data: KsReportData,
+    *,
+    include_detail: bool = True,
+) -> None:
     actual = _funnel_counts(data.events)
     planned = _planned_funnel(data)
     sheet = workbook.add_sheet("Воронка")
@@ -822,7 +846,8 @@ def _build_funnel_workbook(workbook: Workbook, data: KsReportData) -> None:
         )
     manager_sheet.widths = {0: 29, 1: 13, 2: 16, 3: 13, 4: 13, 5: 13, 6: 21}
     manager_sheet.freeze_rows = 6
-    _build_detail_sheet(workbook, data, _events(data.events, "Лид"))
+    if include_detail:
+        _build_detail_sheet(workbook, data, _events(data.events, "Лид"))
 
 
 def _project_summary(events: Sequence[KsEvent]) -> dict[str, Decimal | int]:
@@ -842,7 +867,12 @@ def _project_summary(events: Sequence[KsEvent]) -> dict[str, Decimal | int]:
     }
 
 
-def _build_projects_workbook(workbook: Workbook, data: KsReportData) -> None:
+def _build_projects_workbook(
+    workbook: Workbook,
+    data: KsReportData,
+    *,
+    include_detail: bool = True,
+) -> None:
     current = _project_summary(data.events)
     previous = _project_summary(data.comparison_events)
     sheet = workbook.add_sheet("Проекты и оплаты")
@@ -866,7 +896,23 @@ def _build_projects_workbook(workbook: Workbook, data: KsReportData) -> None:
     sheet.row_heights[note] = 44
     sheet.widths = {0: 28, 1: 15, 2: 18, 3: 16, 4: 20, 5: 24, 6: 24}
     sheet.freeze_rows = 6
-    _build_detail_sheet(workbook, data, [row for row in data.events if row.kind in {"Проект", "Платёж"}])
+    if include_detail:
+        _build_detail_sheet(workbook, data, [row for row in data.events if row.kind in {"Проект", "Платёж"}])
+
+
+def _build_all_workbook(workbook: Workbook, data: KsReportData) -> None:
+    _build_plan_workbook(
+        workbook,
+        data,
+        sheet_name="Общая сводка",
+        include_support=False,
+    )
+    _build_dimension_sheet(workbook, data, "По отделам", "department")
+    _build_dimension_sheet(workbook, data, "По продуктам", "service")
+    _build_managers_workbook(workbook, data, include_detail=False)
+    _build_funnel_workbook(workbook, data, include_detail=False)
+    _build_projects_workbook(workbook, data, include_detail=False)
+    _build_detail_sheet(workbook, data, data.events)
 
 
 def _build_detail_sheet(
@@ -889,7 +935,15 @@ def _build_detail_sheet(
         sheet.auto_filter = f"A6:J{len(sheet.rows)}"
 
 
+@lru_cache(maxsize=32)
 def _font(size: int, bold: bool = False):
+    asset_name = "ks-report-bold.ttf.b64" if bold else "ks-report-regular.ttf.b64"
+    asset_path = Path(__file__).with_name("assets") / asset_name
+    try:
+        font_bytes = base64.b64decode(asset_path.read_text(encoding="ascii"))
+        return ImageFont.truetype(io.BytesIO(font_bytes), size)
+    except (OSError, ValueError):
+        pass
     candidates = (
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/dejavu/DejaVuSans.ttf",
@@ -900,7 +954,7 @@ def _font(size: int, bold: bool = False):
             return ImageFont.truetype(path, size)
         except OSError:
             continue
-    return ImageFont.load_default()
+    return ImageFont.load_default(size=size)
 
 
 def _chart_value(value: float, money: bool) -> str:
@@ -913,6 +967,14 @@ def _chart_value(value: float, money: bool) -> str:
     return f"{value:.0f}"
 
 
+def _change_label(actual: Decimal | int | float, previous: Decimal | int | float) -> str:
+    change = _change(actual, previous)
+    if change is None:
+        return "нет базы сравнения"
+    sign = "+" if change >= 0 else ""
+    return f"к сравнению {sign}{change * 100:.1f}%"
+
+
 def _bar_chart(
     title: str,
     subtitle: str,
@@ -922,6 +984,7 @@ def _bar_chart(
     *,
     money: bool = False,
     comparison_label: str = "Сравнение",
+    cards: Sequence[tuple[str, str, str]] = (),
 ) -> bytes:
     image = Image.new("RGB", (1200, 1200), "#F4F7FB")
     draw = ImageDraw.Draw(image)
@@ -933,31 +996,160 @@ def _bar_chart(
         title_font = _font(title_size, True)
     draw.text((85, 78), title, font=title_font, fill="#173A5E")
     draw.text((85, 137), subtitle, font=_font(24), fill="#5B6B7C")
-    draw.rounded_rectangle((85, 188, 1105, 252), radius=18, fill="#EAF2FA")
-    draw.rectangle((115, 210, 143, 230), fill="#255985")
-    draw.text((156, 202), "Выбранный период", font=_font(22), fill="#213547")
-    draw.rectangle((430, 210, 458, 230), fill="#E89A3C")
-    draw.text((471, 202), comparison_label, font=_font(22), fill="#213547")
+    if cards:
+        card_width = 245
+        for index, (label, value, detail) in enumerate(cards[:4]):
+            left = 85 + index * 255
+            draw.rounded_rectangle(
+                (left, 188, left + card_width, 310),
+                radius=16,
+                fill="#F7F9FC",
+                outline="#DCE5EF",
+                width=2,
+            )
+            draw.text((left + 16, 204), label, font=_font(17), fill="#5B6B7C")
+            draw.text((left + 16, 239), value, font=_font(26, True), fill="#173A5E")
+            draw.text((left + 16, 279), detail, font=_font(14), fill="#7A8998")
+        legend_top = 337
+        start_y = 425
+        available_height = 625
+    else:
+        legend_top = 188
+        start_y = 300
+        available_height = 780
+    draw.rounded_rectangle((85, legend_top, 1105, legend_top + 64), radius=18, fill="#EAF2FA")
+    draw.rectangle((115, legend_top + 22, 143, legend_top + 42), fill="#255985")
+    draw.text((156, legend_top + 14), "Выбранный период", font=_font(20), fill="#213547")
+    draw.rectangle((430, legend_top + 22, 458, legend_top + 42), fill="#E89A3C")
+    draw.text((471, legend_top + 14), comparison_label, font=_font(20), fill="#213547")
 
     if not labels:
         draw.text((420, 570), "Нет данных за выбранный период", font=_font(30, True), fill="#66788A")
     else:
         maximum = max([*current, *comparison, 1.0])
-        start_y = 300
-        row_height = min(150, 780 // max(len(labels), 1))
-        label_width = 280
-        bar_left = 365
-        bar_width = 650
+        row_height = min(128, available_height // max(len(labels), 1))
+        bar_left = 330
+        bar_width = 680
         for index, label in enumerate(labels):
             y = start_y + index * row_height
             display = label if len(label) <= 23 else label[:22] + "…"
-            draw.text((85, y + 18), display, font=_font(23, True), fill="#213547")
+            draw.text((85, y + 16), display, font=_font(19, True), fill="#213547")
             current_width = int(bar_width * max(current[index], 0) / maximum)
             compare_width = int(bar_width * max(comparison[index], 0) / maximum)
-            draw.rounded_rectangle((bar_left, y + 8, bar_left + current_width, y + 38), radius=9, fill="#255985")
-            draw.rounded_rectangle((bar_left, y + 48, bar_left + compare_width, y + 78), radius=9, fill="#E89A3C")
-            draw.text((bar_left + current_width + 12, y + 7), _chart_value(current[index], money), font=_font(20, True), fill="#173A5E")
-            draw.text((bar_left + compare_width + 12, y + 47), _chart_value(comparison[index], money), font=_font(20), fill="#7C5630")
+            draw.rounded_rectangle((bar_left, y + 7, bar_left + current_width, y + 32), radius=8, fill="#255985")
+            draw.rounded_rectangle((bar_left, y + 40, bar_left + compare_width, y + 65), radius=8, fill="#E89A3C")
+            draw.text((bar_left + current_width + 10, y + 4), _chart_value(current[index], money), font=_font(17, True), fill="#173A5E")
+            draw.text((bar_left + compare_width + 10, y + 37), _chart_value(comparison[index], money), font=_font(17), fill="#7C5630")
+    draw.text((85, 1092), "EcoStar Reports · данные CRM", font=_font(20), fill="#7A8998")
+    output = io.BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    return output.getvalue()
+
+
+def _summary_chart(data: KsReportData) -> bytes:
+    current = _metrics(data.events)
+    previous = _metrics(data.comparison_events)
+    projects = _project_summary(data.events)
+    image = Image.new("RGB", (1200, 1200), "#F4F7FB")
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle(
+        (45, 45, 1155, 1155),
+        radius=28,
+        fill="#FFFFFF",
+        outline="#DCE5EF",
+        width=2,
+    )
+    draw.text((85, 78), "КС · Общий отчёт", font=_font(42, True), fill="#173A5E")
+    draw.text(
+        (85, 137),
+        f"{data.date_from:%d.%m.%Y}–{data.date_to:%d.%m.%Y} · {data.filter_labels['department']}",
+        font=_font(24),
+        fill="#5B6B7C",
+    )
+
+    conversion = current["conversion"]
+    previous_projects = _project_summary(data.comparison_events)
+    cards = (
+        ("Касса", _chart_value(float(current["cash"]), True), _change_label(current["cash"], previous["cash"])),
+        ("Возникновение", _chart_value(float(current["occurrence"]), True), _change_label(current["occurrence"], previous["occurrence"])),
+        ("Ожидает оплаты", _chart_value(float(projects["awaiting"]), True), _change_label(projects["awaiting"], previous_projects["awaiting"])),
+        ("Лиды", str(current["leads"]), _change_label(current["leads"], previous["leads"])),
+        ("Проекты", str(current["projects"]), _change_label(current["projects"], previous["projects"])),
+        ("Конверсия", f"{float(conversion) * 100:.1f}%" if conversion is not None else "—", "проекты / лиды"),
+    )
+    for index, (label, value, detail) in enumerate(cards):
+        column = index % 3
+        row = index // 3
+        left = 85 + column * 340
+        top = 188 + row * 112
+        draw.rounded_rectangle(
+            (left, top, left + 310, top + 98),
+            radius=16,
+            fill="#EAF2FA" if row == 0 else "#F7F9FC",
+            outline="#DCE5EF",
+            width=2,
+        )
+        draw.text((left + 18, top + 12), label, font=_font(16), fill="#5B6B7C")
+        draw.text((left + 18, top + 38), value, font=_font(25, True), fill="#173A5E")
+        draw.text((left + 18, top + 72), detail, font=_font(13), fill="#7A8998")
+
+    panel_top = 425
+    draw.rounded_rectangle((85, panel_top, 570, 730), radius=18, fill="#F7F9FC", outline="#DCE5EF", width=2)
+    draw.text((108, panel_top + 18), "Деньги: факт и сравнение", font=_font(21, True), fill="#213547")
+    draw.rectangle((108, panel_top + 56, 128, panel_top + 70), fill="#255985")
+    draw.text((138, panel_top + 49), "Факт", font=_font(15), fill="#5B6B7C")
+    draw.rectangle((222, panel_top + 56, 242, panel_top + 70), fill="#E89A3C")
+    draw.text((252, panel_top + 49), "Сравнение", font=_font(15), fill="#5B6B7C")
+    current_values = (float(current["cash"]), float(current["occurrence"]))
+    previous_values = (float(previous["cash"]), float(previous["occurrence"]))
+    maximum = max(*current_values, *previous_values, 1.0)
+    for index, label in enumerate(("Касса", "Возникновение")):
+        top = panel_top + 95 + index * 92
+        draw.text((108, top), label, font=_font(16, True), fill="#213547")
+        current_width = int(275 * max(current_values[index], 0) / maximum)
+        previous_width = int(275 * max(previous_values[index], 0) / maximum)
+        draw.rounded_rectangle((245, top, 245 + current_width, top + 19), radius=6, fill="#255985")
+        draw.rounded_rectangle((245, top + 27, 245 + previous_width, top + 46), radius=6, fill="#E89A3C")
+        draw.text((245, top + 52), f"{_chart_value(current_values[index], True)} / {_chart_value(previous_values[index], True)}", font=_font(14), fill="#5B6B7C")
+
+    actual_funnel = _funnel_counts(data.events)
+    funnel_values = (
+        ("Лиды", int(current["leads"])),
+        ("КП", int(current["offers"])),
+        ("Проекты", int(current["projects"])),
+        ("Успех", actual_funnel["Успех"]),
+    )
+    draw.rounded_rectangle((590, panel_top, 1105, 730), radius=18, fill="#F7F9FC", outline="#DCE5EF", width=2)
+    draw.text((614, panel_top + 18), "Воронка за период", font=_font(21, True), fill="#213547")
+    funnel_max = max((value for _, value in funnel_values), default=1) or 1
+    for index, (label, value) in enumerate(funnel_values):
+        top = panel_top + 68 + index * 55
+        width = int(330 * value / funnel_max)
+        draw.text((614, top), label, font=_font(16), fill="#213547")
+        draw.rounded_rectangle((738, top + 2, 738 + width, top + 22), radius=7, fill="#255985" if index < 3 else "#2E9C73")
+        draw.text((1080, top - 2), str(value), anchor="ra", font=_font(17, True), fill="#173A5E")
+
+    manager_groups = _manager_groups(data.events)
+    ranking = sorted(
+        manager_groups,
+        key=lambda name: float(_metrics(manager_groups[name])["occurrence"]),
+        reverse=True,
+    )[:3]
+    draw.rounded_rectangle((85, 750, 1105, 1060), radius=18, fill="#F7F9FC", outline="#DCE5EF", width=2)
+    draw.text((108, 770), "Топ-3 менеджера по возникновению", font=_font(21, True), fill="#213547")
+    ranking_max = max((float(_metrics(manager_groups[name])["occurrence"]) for name in ranking), default=1.0) or 1.0
+    if ranking:
+        for index, name in enumerate(ranking):
+            value = float(_metrics(manager_groups[name])["occurrence"])
+            top = 822 + index * 70
+            display = name if len(name) <= 24 else name[:23] + "…"
+            draw.text((108, top), display, font=_font(17, True), fill="#213547")
+            width = int(560 * value / ranking_max)
+            draw.rounded_rectangle((430, top + 2, 430 + width, top + 25), radius=7, fill="#255985")
+            draw.text((1010, top - 2), _chart_value(value, True), font=_font(17, True), fill="#173A5E")
+    else:
+        draw.text((410, 885), "Нет данных по менеджерам", font=_font(18), fill="#7A8998")
+
     draw.text((85, 1092), "EcoStar Reports · данные CRM", font=_font(20), fill="#7A8998")
     output = io.BytesIO()
     image.save(output, format="PNG", optimize=True)
@@ -966,6 +1158,8 @@ def _bar_chart(
 
 def build_ks_chart(data: KsReportData) -> bytes:
     subtitle = f"{data.date_from:%d.%m.%Y}–{data.date_to:%d.%m.%Y} · {data.filter_labels['department']}"
+    if data.report_kind == "all":
+        return _summary_chart(data)
     if data.report_kind == "plan":
         current = _metrics(data.events)
         previous = _metrics(data.comparison_events)
@@ -977,8 +1171,16 @@ def build_ks_chart(data: KsReportData) -> bytes:
             (float(previous["cash"]), float(previous["occurrence"])),
             money=True,
             comparison_label="План-ориентир",
+            cards=(
+                ("Касса", _chart_value(float(current["cash"]), True), _change_label(current["cash"], previous["cash"])),
+                ("Возникновение", _chart_value(float(current["occurrence"]), True), _change_label(current["occurrence"], previous["occurrence"])),
+                ("Лиды", str(current["leads"]), _change_label(current["leads"], previous["leads"])),
+                ("Конверсия", f"{float(current['conversion']) * 100:.1f}%" if current["conversion"] is not None else "—", "проекты / лиды"),
+            ),
         )
     if data.report_kind == "managers":
+        current = _metrics(data.events)
+        previous = _metrics(data.comparison_events)
         current_groups = _manager_groups(data.events)
         previous_groups = _manager_groups(data.comparison_events)
         ranking = sorted(
@@ -993,8 +1195,16 @@ def build_ks_chart(data: KsReportData) -> bytes:
             [float(_metrics(current_groups[name])["occurrence"]) for name in ranking],
             [float(_metrics(previous_groups.get(name, []))["occurrence"]) for name in ranking],
             money=True,
+            cards=(
+                ("Менеджеры", str(len(current_groups)), "с активностью за период"),
+                ("Звонки", str(current["calls"]), _change_label(current["calls"], previous["calls"])),
+                ("Лиды", str(current["leads"]), _change_label(current["leads"], previous["leads"])),
+                ("Проекты", str(current["projects"]), _change_label(current["projects"], previous["projects"])),
+            ),
         )
     if data.report_kind == "funnel":
+        current = _metrics(data.events)
+        previous = _metrics(data.comparison_events)
         actual = _funnel_counts(data.events)
         planned = _planned_funnel(data)
         labels = ("Новая", "Ждём ШР", "Думает", "Успех")
@@ -1005,6 +1215,12 @@ def build_ks_chart(data: KsReportData) -> bytes:
             [float(actual[label]) for label in labels],
             [float(planned[label]) for label in labels],
             comparison_label="Необходимо",
+            cards=(
+                ("Лиды", str(current["leads"]), _change_label(current["leads"], previous["leads"])),
+                ("КП", str(current["offers"]), _change_label(current["offers"], previous["offers"])),
+                ("Успех", str(actual["Успех"]), "успешные заявки"),
+                ("Конверсия", f"{float(current['conversion']) * 100:.1f}%" if current["conversion"] is not None else "—", "проекты / лиды"),
+            ),
         )
     current = _project_summary(data.events)
     previous = _project_summary(data.comparison_events)
@@ -1015,6 +1231,12 @@ def build_ks_chart(data: KsReportData) -> bytes:
         [float(current["occurrence"]), float(current["paid"]), float(current["awaiting"])],
         [float(previous["occurrence"]), float(previous["paid"]), float(previous["awaiting"])],
         money=True,
+        cards=(
+            ("Проекты", str(current["projects"]), _change_label(current["projects"], previous["projects"])),
+            ("Сумма проектов", _chart_value(float(current["occurrence"]), True), _change_label(current["occurrence"], previous["occurrence"])),
+            ("Оплачено", _chart_value(float(current["paid"]), True), _change_label(current["paid"], previous["paid"])),
+            ("Ожидает оплаты", _chart_value(float(current["awaiting"]), True), _change_label(current["awaiting"], previous["awaiting"])),
+        ),
     )
 
 

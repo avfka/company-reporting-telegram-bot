@@ -349,7 +349,7 @@ def test_parse_callback_reads_chat_and_sender() -> None:
     assert parsed.user_id == 42
 
 
-def test_reports_ks_shows_four_separate_reports() -> None:
+def test_reports_ks_shows_combined_and_four_separate_reports() -> None:
     sent = []
 
     async def send(chat_id, text, reply_markup=None):
@@ -368,8 +368,8 @@ def test_reports_ks_shows_four_separate_reports() -> None:
         )
     )
     buttons = sent[0][1]["inline_keyboard"]
-    assert len(buttons) == 4
-    assert buttons[0][0]["callback_data"].startswith("ks:open:")
+    assert len(buttons) == 5
+    assert buttons[0][0]["callback_data"] == "ks:open:ksa"
 
 
 def test_direct_ks_report_dates_continue_to_filters() -> None:

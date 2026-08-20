@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 KS_COMMANDS = {
+    "/reports_ks_all": ("ksa", "all", "КС — Общий отчёт"),
     "/reports_ks_plan": ("ksp", "plan", "КС — План-факт"),
     "/reports_ks_managers": ("ksm", "managers", "КС — Менеджеры"),
     "/reports_ks_funnel": ("ksf", "funnel", "КС — Воронка"),
@@ -165,7 +166,7 @@ def _help_text() -> str:
         "/reports — список доступных отчётов\n"
         "/reports_sks — подробный Excel-отчёт СКС с выбором дат\n"
         "/reports_dota — Excel-отчёт ДОТ по запускам и выпускам\n"
-        "/reports_ks — меню аналитики КС: план-факт, менеджеры, воронка, проекты\n"
+        "/reports_ks — меню аналитики КС: общий отчёт и отдельные разделы\n"
         "/run &lt;отчёт&gt; [параметр=значение] — сформировать отчёт\n"
         "/whoami — показать ваш Telegram ID\n"
         "/help — помощь"
@@ -180,7 +181,7 @@ def _report_list(catalog: ReportCatalog) -> str:
         "\n<code>reports_dota</code> — Отчёт ДОТ по запускам и выпускам",
         "Excel со сводкой, ежедневной динамикой и детализацией проектов. Команда: /reports_dota",
         "\n<code>reports_ks</code> — Аналитика КС",
-        "Четыре отдельных отчёта с фильтрами, Excel и графиком. Команда: /reports_ks",
+        "Общий отчёт и четыре отдельных раздела с фильтрами, Excel и графиком. Команда: /reports_ks",
     ]
     for report in catalog.all():
         suffix = ""

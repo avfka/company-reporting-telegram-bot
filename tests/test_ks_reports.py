@@ -43,7 +43,7 @@ def sample_data(report_kind: str) -> KsReportData:
 
 
 def test_all_ks_reports_create_valid_workbooks_and_png_charts() -> None:
-    for report_kind in ("plan", "managers", "funnel", "projects"):
+    for report_kind in ("all", "plan", "managers", "funnel", "projects"):
         data = sample_data(report_kind)
         workbook = build_ks_workbook(data)
         with zipfile.ZipFile(io.BytesIO(workbook)) as archive:
@@ -59,6 +59,23 @@ def test_all_ks_reports_create_valid_workbooks_and_png_charts() -> None:
         image = Image.open(io.BytesIO(chart))
         assert image.format == "PNG"
         assert image.size == (1200, 1200)
+
+
+def test_combined_report_contains_every_analytics_section() -> None:
+    workbook = build_ks_workbook(sample_data("all"))
+    with zipfile.ZipFile(io.BytesIO(workbook)) as archive:
+        workbook_xml = archive.read("xl/workbook.xml").decode("utf-8")
+    for sheet_name in (
+        "Общая сводка",
+        "По отделам",
+        "По продуктам",
+        "Менеджеры",
+        "Воронка",
+        "По менеджерам",
+        "Проекты и оплаты",
+        "Детализация",
+    ):
+        assert sheet_name in workbook_xml
 
 
 def test_product_filter_uses_compact_hash_token() -> None:
