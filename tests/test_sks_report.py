@@ -27,10 +27,9 @@ def test_working_seconds_caps_to_workday() -> None:
 
 
 def test_task_query_includes_combined_contract_and_invoice_titles() -> None:
-    contract_titles = "('договор', 'договор и счет', 'счет и договор')"
     all_titles = "('договор', 'договор и счет', 'счет и договор', 'счет')"
 
-    assert f"normalized_title IN {contract_titles}" in TASK_DURATION_SQL
+    assert "'Договор и счет' AS category" in TASK_DURATION_SQL
     assert f"normalized_title IN {all_titles}" in TASK_DURATION_SQL
     assert "regexp_replace(trim(title), '\\s+', ' ', 'g')" in TASK_DURATION_SQL
     assert "'ё'," in TASK_DURATION_SQL
@@ -49,7 +48,7 @@ def test_build_sks_workbook_creates_valid_xlsx_package() -> None:
         sale_price=Decimal("125000.50"),
     )
     task = TaskMetric(
-        category="Договор",
+        category="Договор и счет",
         created_at=datetime(2026, 7, 1, 17, 0),
         closed_at=datetime(2026, 7, 2, 9, 30),
         working_seconds=3600,
@@ -70,6 +69,12 @@ def test_build_sks_workbook_creates_valid_xlsx_package() -> None:
         assert len([name for name in archive.namelist() if name.startswith("xl/worksheets/sheet")]) == 6
         workbook_xml = archive.read("xl/workbook.xml").decode("utf-8")
         summary_xml = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        workbook_content = "".join(
+            archive.read(name).decode("utf-8")
+            for name in archive.namelist()
+            if name.startswith("xl/") and name.endswith(".xml")
+        )
     assert "Сводка" in workbook_xml
     assert "Отчёт СКС" in summary_xml
     assert "Иванова Елена" in summary_xml
+    assert "Договор и счет" in workbook_content

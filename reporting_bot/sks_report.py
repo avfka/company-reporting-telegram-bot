@@ -165,10 +165,7 @@ WITH completed_tasks AS (
     AND closed_at >= created_at
 )
 SELECT
-  CASE
-    WHEN normalized_title IN ('договор', 'договор и счет', 'счет и договор') THEN 'Договор'
-    ELSE 'Счет'
-  END AS category,
+  'Договор и счет' AS category,
   created_at,
   closed_at
 FROM completed_tasks
@@ -544,32 +541,28 @@ def _build_task_sheet(workbook: Workbook, data: SksReportData, period: str) -> N
         ["Название", "Закрыто, шт.", "Среднее рабочее время", "План", "Отклонение к плану", "Минимум", "Максимум"],
         STYLE["table_header"],
     )
-    for category in ("Договор", "Счет", "Итого"):
-        values = list(data.tasks) if category == "Итого" else [task for task in data.tasks if task.category == category]
-        seconds = [task.working_seconds for task in values]
-        average = mean(seconds) if seconds else None
-        total = category == "Итого"
-        styles = [
-            STYLE["total_text"] if total else STYLE["table_text"],
-            STYLE["total_number"] if total else STYLE["table_number"],
-            STYLE["total_time"] if total else STYLE["table_time"],
-            STYLE["total_time"] if total else STYLE["table_time"],
-            STYLE["total_percent"] if total else STYLE["table_percent"],
-            STYLE["total_time"] if total else STYLE["table_time"],
-            STYLE["total_time"] if total else STYLE["table_time"],
-        ]
-        sheet.append(
-            [
-                category,
-                len(values),
-                "—" if average is None else average / 86400,
-                PLAN_TASK_SECONDS / 86400,
-                _variance(average, PLAN_TASK_SECONDS, lower_is_better=True),
-                "—" if not seconds else min(seconds) / 86400,
-                "—" if not seconds else max(seconds) / 86400,
-            ],
-            styles,
-        )
+    seconds = [task.working_seconds for task in data.tasks]
+    average = mean(seconds) if seconds else None
+    sheet.append(
+        [
+            "Договор и счет",
+            len(data.tasks),
+            "—" if average is None else average / 86400,
+            PLAN_TASK_SECONDS / 86400,
+            _variance(average, PLAN_TASK_SECONDS, lower_is_better=True),
+            "—" if not seconds else min(seconds) / 86400,
+            "—" if not seconds else max(seconds) / 86400,
+        ],
+        [
+            STYLE["total_text"],
+            STYLE["total_number"],
+            STYLE["total_time"],
+            STYLE["total_time"],
+            STYLE["total_percent"],
+            STYLE["total_time"],
+            STYLE["total_time"],
+        ],
+    )
 
     sheet.append([None] * 7)
     section = sheet.append(["Закрытые задачи с точным названием «отправка»"] + [None] * 6, STYLE["section"])
@@ -580,7 +573,7 @@ def _build_task_sheet(workbook: Workbook, data: SksReportData, period: str) -> N
 
     sheet.append([None] * 7)
     note = sheet.append(
-        ["Рабочее время рассчитано по будням 09:00–17:30 (Москва); ночи и выходные исключены. Включены выполненные задачи «Договор», «Счет», «Договор и счет» и «Счет и договор»; регистр, ё/е и лишние пробелы не влияют. Комбинированные названия относятся к категории «Договор»." ] + [None] * 6,
+        ["Рабочее время рассчитано по будням 09:00–17:30 (Москва); ночи и выходные исключены. Выполненные задачи «Договор», «Счет», «Договор и счет» и «Счет и договор» объединены в одну категорию «Договор и счет»; регистр, ё/е и лишние пробелы не влияют." ] + [None] * 6,
         STYLE["note"],
     )
     sheet.merges.append(f"A{note}:G{note}")
