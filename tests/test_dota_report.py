@@ -1,5 +1,6 @@
 import io
 import zipfile
+from dataclasses import replace
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -9,6 +10,8 @@ from reporting_bot.dota_report import (
     DOTA_EVENTS_SQL,
     DotaEvent,
     DotaReportData,
+    _dota_daily_series,
+    _dota_share_rows,
     _parse_monthly_plans,
     _previous_month_date,
     build_dota_chart,
@@ -130,4 +133,32 @@ def test_build_dota_chart_creates_readable_png() -> None:
 
     image = Image.open(io.BytesIO(content))
     assert image.format == "PNG"
-    assert image.size == (1200, 1500)
+    assert image.size == (1200, 1800)
+
+
+def test_dota_infographic_uses_daily_values_and_groups_small_pie_slices() -> None:
+    rows = tuple(
+        replace(
+            event("Запуск", "Обучение", str(index), datetime(2026, 8, index, 10)),
+            company_name=f"Компания {index}",
+            amount=Decimal(index * 100),
+        )
+        for index in range(1, 5)
+    )
+    data = DotaReportData(
+        date_from=date(2026, 8, 1),
+        date_to=date(2026, 8, 4),
+        previous_date_from=date(2026, 7, 1),
+        previous_date_to=date(2026, 7, 4),
+        events=rows,
+        previous_events=(),
+    )
+
+    shares = _dota_share_rows(rows, lambda row: row.company_name, max_items=2)
+    dates, launch, release = _dota_daily_series(data, lambda row: row.amount)
+
+    assert [label for label, _ in shares] == ["Компания 4", "Компания 3", "Остальные"]
+    assert shares[-1][1] == Decimal("300")
+    assert dates == [date(2026, 8, day) for day in range(1, 5)]
+    assert launch == [100.0, 200.0, 300.0, 400.0]
+    assert release == [0.0, 0.0, 0.0, 0.0]
