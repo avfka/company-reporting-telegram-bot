@@ -40,6 +40,7 @@ def test_task_query_matches_titles_containing_contract_or_invoice_except_edo() -
     assert "normalized_title LIKE '%договор%'" in TASK_DURATION_SQL
     assert "normalized_title LIKE '%счет%'" in TASK_DURATION_SQL
     assert "normalized_title NOT LIKE '%эдо%'" in TASK_DURATION_SQL
+    assert "closed_at - created_at < INTERVAL '14 hours'" in TASK_DURATION_SQL
 
 
 def test_sks_stage_queries_keep_close_project_and_accept_stage_label_variants() -> None:
@@ -89,6 +90,9 @@ def test_build_sks_workbook_creates_valid_xlsx_package() -> None:
     assert "Сводка" in workbook_xml
     assert "Отчёт СКС" in summary_xml
     assert "Иванова Елена" in summary_xml
+    assert "Среднее время отправки · все СКС" in summary_xml
+    assert "Согласовано отчетов · все СКС" in summary_xml
+    assert "Среднее время задачи · &lt; 14 часов" in summary_xml
     assert "Договор и счет" in workbook_content
     assert "Аномалии" in workbook_xml
 

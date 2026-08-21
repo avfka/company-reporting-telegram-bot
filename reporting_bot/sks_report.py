@@ -169,6 +169,7 @@ WITH completed_tasks AS (
     AND closed_at >= CAST(:date_from AS DATE)
     AND closed_at < CAST(:date_to_exclusive AS DATE)
     AND closed_at >= created_at
+    AND closed_at - created_at < INTERVAL '14 hours'
 )
 SELECT
   'Договор и счет' AS category,
@@ -560,18 +561,18 @@ def build_sks_chart(data: SksReportData) -> bytes:
     primary = _summary_values(data, PRIMARY_SPECIALISTS)
     task_average = _average(task.working_seconds for task in data.tasks)
     all_send_average = _average(row.duration_days for row in _duration_rows(data.sends))
-    send_detail, send_color = _sks_plan_detail(primary["send_days"], PLAN_SEND_DAYS, lower_is_better=True)
+    send_detail, send_color = _sks_plan_detail(all_send_average, PLAN_SEND_DAYS, lower_is_better=True)
+    primary_send_detail, primary_send_color = _sks_plan_detail(primary["send_days"], PLAN_SEND_DAYS, lower_is_better=True)
     task_detail, task_color = _sks_plan_detail(task_average, PLAN_TASK_SECONDS, lower_is_better=True)
-    count_detail, count_color = _sks_plan_detail(primary["approved_count"], PLAN_APPROVED_COUNT, lower_is_better=False)
+    count_detail, count_color = _sks_plan_detail(len(data.agreements), PLAN_APPROVED_COUNT, lower_is_better=False)
     amount_detail, amount_color = _sks_plan_detail(primary["approved_amount"], PLAN_APPROVED_AMOUNT, lower_is_better=False)
-    all_send_detail, all_send_color = _sks_plan_detail(all_send_average, PLAN_SEND_DAYS, lower_is_better=True)
     cards = (
         ("Согласование · 6 спец.", _sks_days(primary["agreement_days"]), "среднее за период", blue, "#7A8998"),
-        ("Отправка · 6 спец.", _sks_days(primary["send_days"]), send_detail, orange, send_color),
-        ("Отправка · все СКС", _sks_days(all_send_average), all_send_detail, purple, all_send_color),
+        ("Отправка · все СКС", _sks_days(all_send_average), send_detail, orange, send_color),
+        ("Отправка · 6 спец.", _sks_days(primary["send_days"]), primary_send_detail, purple, primary_send_color),
         ("Задачи · договор/счет", _sks_time(task_average), task_detail, green, task_color),
-        ("Согласовано", f"{primary['approved_count']} шт.", count_detail, blue, count_color),
-        ("Сумма согласованных", _sks_money(primary["approved_amount"]), amount_detail, orange, amount_color),
+        ("Согласовано · все СКС", f"{len(data.agreements)} шт.", count_detail, blue, count_color),
+        ("Сумма · 6 спец.", _sks_money(primary["approved_amount"]), amount_detail, orange, amount_color),
     )
     for index, card in enumerate(cards):
         column = index % 3
@@ -583,16 +584,15 @@ def build_sks_chart(data: SksReportData) -> bytes:
     _draw_sks_duration_panel(draw, (85, 455, 1105, 1025), data)
     _draw_sks_approval_panel(draw, (85, 1050, 1105, 1555), data)
 
-    primary_agreements = _subset(data.agreements, PRIMARY_SPECIALISTS)
-    sout_rows = [row for row in primary_agreements if row.service == "sout"]
-    other_rows = [row for row in primary_agreements if row.service != "sout"]
-    anomaly_agreement = len(_anomaly_rows(primary_agreements))
+    sout_rows = [row for row in data.agreements if row.service == "sout"]
+    other_rows = [row for row in data.agreements if row.service != "sout"]
+    anomaly_agreement = len(_anomaly_rows(data.agreements))
     anomaly_send = len(_anomaly_rows(data.sends))
     sending_diana = data.sending_tasks.get("Балакирева Диана", 0)
     sending_vladislava = data.sending_tasks.get("Кулешева Владислава", 0)
     operational_cards = (
-        ("СОУТ · согласовано", f"{len(sout_rows)} шт.", _sks_money(sum((row.sale_price for row in sout_rows), Decimal(0))), blue),
-        ("Другие услуги", f"{len(other_rows)} шт.", _sks_money(sum((row.sale_price for row in other_rows), Decimal(0))), green),
+        ("СОУТ · все СКС", f"{len(sout_rows)} шт.", "согласовано за период", blue),
+        ("Другие · все СКС", f"{len(other_rows)} шт.", "согласовано за период", green),
         ("Задачи «отправка»", f"{sending_diana + sending_vladislava} шт.", f"Балакирева {sending_diana} · Кулешева {sending_vladislava}", orange),
         ("Аномалии > 200 дней", f"{anomaly_agreement + anomaly_send} записей", f"согласование {anomaly_agreement} · отправка {anomaly_send}", purple),
     )
@@ -601,11 +601,12 @@ def build_sks_chart(data: SksReportData) -> bytes:
         left = 85 + index * 255
         _draw_sks_card(draw, (left, 1635, left + 245, 1755), label, value, detail, accent)
 
-    draw.rounded_rectangle((85, 1790, 1105, 1908), radius=18, fill="#F1F5F9")
+    draw.rounded_rectangle((85, 1790, 1105, 1920), radius=18, fill="#F1F5F9")
     draw.text((108, 1810), "Как читать показатели", font=_sks_font(17, True), fill="#213547")
     draw.text((108, 1841), "• Положительный процент означает результат лучше плана. План применяется к выбранному периоду без пересчёта.", font=_sks_font(14), fill="#5B6B7C")
     draw.text((108, 1868), "• Проекты свыше 200 дней исключены только из средних сроков; в количестве и сумме они сохранены.", font=_sks_font(14), fill="#5B6B7C")
-    draw.text((85, 1923), "EcoStar Reports · подробности и список проектов — в Excel", font=_sks_font(16), fill="#7A8998")
+    draw.text((108, 1895), "• Задачи с полной календарной длительностью 14 часов и более исключены из расчёта.", font=_sks_font(14), fill="#5B6B7C")
+    draw.text((85, 1932), "EcoStar Reports · подробности и список проектов — в Excel", font=_sks_font(16), fill="#7A8998")
 
     output = io.BytesIO()
     image.save(output, format="PNG", optimize=True)
@@ -629,7 +630,7 @@ def _build_summary_sheet(workbook: Workbook, data: SksReportData, period: str) -
     sheet = workbook.add_sheet("Сводка")
     _title(sheet, "Отчёт СКС", period, 8)
     sheet.append([None] * 8)
-    sheet.append(["Ключевые показатели · основные 6 специалистов"] + [None] * 7, STYLE["section"])
+    sheet.append(["Ключевые показатели · область расчёта указана в названии"] + [None] * 7, STYLE["section"])
     sheet.merges.append("A4:H4")
     sheet.append(
         ["Показатель", "План", "Факт", "Отклонение к плану", "Единица", "Метод", None, None],
@@ -638,11 +639,12 @@ def _build_summary_sheet(workbook: Workbook, data: SksReportData, period: str) -
 
     primary = _summary_values(data, PRIMARY_SPECIALISTS)
     task_average = _average(task.working_seconds for task in data.tasks)
+    all_send_average = _average(row.duration_days for row in _duration_rows(data.sends))
     kpis = [
-        ("Среднее время отправки", PLAN_SEND_DAYS, primary["send_days"], True, "дни", "меньше — лучше", "days"),
-        ("Среднее время выполнения задачи", PLAN_TASK_SECONDS / 86400, None if task_average is None else task_average / 86400, True, "ч:м:с", "меньше — лучше", "time"),
-        ("Согласовано отчетов", PLAN_APPROVED_COUNT, primary["approved_count"], False, "шт.", "больше — лучше", "number"),
-        ("Согласовано отчетов", PLAN_APPROVED_AMOUNT, primary["approved_amount"], False, "руб.", "больше — лучше", "money"),
+        ("Среднее время отправки · все СКС", PLAN_SEND_DAYS, all_send_average, True, "дни", "меньше — лучше", "days"),
+        ("Среднее время задачи · < 14 часов", PLAN_TASK_SECONDS / 86400, None if task_average is None else task_average / 86400, True, "ч:м:с", "меньше — лучше", "time"),
+        ("Согласовано отчетов · все СКС", PLAN_APPROVED_COUNT, len(data.agreements), False, "шт.", "больше — лучше", "number"),
+        ("Согласовано отчетов · основные 6", PLAN_APPROVED_AMOUNT, primary["approved_amount"], False, "руб.", "больше — лучше", "money"),
     ]
     for label, plan, actual, lower, unit, method, kind in kpis:
         value_style = {
@@ -692,27 +694,27 @@ def _build_summary_sheet(workbook: Workbook, data: SksReportData, period: str) -
         )
 
     sheet.append([None] * 8)
-    sheet.append(["Контроль согласованных отчётов · основные 6 специалистов"] + [None] * 7, STYLE["section"])
+    sheet.append(["Контроль согласованных отчётов · количество по всем СКС, деньги и сроки по основным 6"] + [None] * 7, STYLE["section"])
     sheet.merges.append(f"A{len(sheet.rows)}:H{len(sheet.rows)}")
     sheet.append(
-        ["Категория", "Проектов, шт.", "Сумма, руб.", "Среднее, дни", "Аномалий > 200 дней", None, None, None],
+        ["Категория", "Все СКС, шт.", "Основные 6, руб.", "Основные 6, дни", "Аномалий > 200 дней · основные 6", None, None, None],
         STYLE["table_header"],
     )
     primary_agreements = _subset(data.agreements, PRIMARY_SPECIALISTS)
-    for label, rows in (
-        ("СОУТ", [row for row in primary_agreements if row.service == "sout"]),
-        ("Другие услуги", [row for row in primary_agreements if row.service != "sout"]),
-        ("Итого", primary_agreements),
+    for label, all_rows, primary_rows in (
+        ("СОУТ", [row for row in data.agreements if row.service == "sout"], [row for row in primary_agreements if row.service == "sout"]),
+        ("Другие услуги", [row for row in data.agreements if row.service != "sout"], [row for row in primary_agreements if row.service != "sout"]),
+        ("Итого", list(data.agreements), primary_agreements),
     ):
-        valid_rows = _duration_rows(rows)
+        valid_rows = _duration_rows(primary_rows)
         total = label == "Итого"
         sheet.append(
             [
                 label,
-                len(rows),
-                sum((row.sale_price for row in rows), Decimal(0)),
+                len(all_rows),
+                sum((row.sale_price for row in primary_rows), Decimal(0)),
                 _average(row.duration_days for row in valid_rows) if valid_rows else "—",
-                len(_anomaly_rows(rows)),
+                len(_anomaly_rows(primary_rows)),
                 None,
                 None,
                 None,
@@ -754,7 +756,7 @@ def _build_summary_sheet(workbook: Workbook, data: SksReportData, period: str) -
     sheet.append([None] * 8)
     note_row = sheet.append(
         [
-            "Отклонение: положительное значение означает выполнение лучше плана. Длительности свыше 200 дней отмечаются как аномалии и не входят в показатели времени, но проекты и их стоимость сохраняются в количестве и суммах. План применяется к выбранному периоду без пересчёта.",
+            "Отклонение: положительное значение означает выполнение лучше плана. Отправка и количество согласованных считаются по всем СКС; сумма согласованных — по основным 6 специалистам. Длительности проектов свыше 200 дней исключаются только из показателей времени. Задачи длительностью 14 часов и более исключаются полностью. План применяется к выбранному периоду без пересчёта.",
             None, None, None, None, None, None, None,
         ],
         STYLE["note"],
@@ -860,11 +862,11 @@ def _build_task_sheet(workbook: Workbook, data: SksReportData, period: str) -> N
 
     sheet.append([None] * 7)
     note = sheet.append(
-        ["Рабочее время рассчитано по будням 09:00–17:30 (Москва); ночи и выходные исключены. Учитываются выполненные задачи, название которых содержит «Договор» или «Счет», но не содержит «ЭДО»; регистр, ё/е и лишние пробелы не влияют." ] + [None] * 6,
+        ["Рабочее время рассчитано по будням 09:00–17:30 (Москва); ночи и выходные исключены. Задачи с полной календарной длительностью 14 часов и более полностью исключены. Учитываются выполненные задачи, название которых содержит «Договор» или «Счет», но не содержит «ЭДО»; регистр, ё/е и лишние пробелы не влияют." ] + [None] * 6,
         STYLE["note"],
     )
     sheet.merges.append(f"A{note}:G{note}")
-    sheet.row_heights[note] = 46
+    sheet.row_heights[note] = 58
     sheet.widths = {0: 29, 1: 17, 2: 23, 3: 18, 4: 22, 5: 18, 6: 18}
     sheet.freeze_rows = 4
 
