@@ -23,14 +23,14 @@ from reporting_bot.sks_report import (
 def test_working_seconds_excludes_nights_and_weekends() -> None:
     start = datetime(2026, 7, 3, 17, 0)  # Friday
     end = datetime(2026, 7, 6, 9, 30)  # Monday
-    assert working_seconds(start, end) == 60 * 60
+    assert working_seconds(start, end) == 2 * 60 * 60
 
 
 def test_working_seconds_caps_to_workday() -> None:
     assert working_seconds(
         datetime(2026, 7, 6, 8, 0),
         datetime(2026, 7, 6, 18, 0),
-    ) == 8.5 * 60 * 60
+    ) == 9.5 * 60 * 60
 
 
 def test_task_query_matches_titles_containing_contract_or_invoice_except_edo() -> None:

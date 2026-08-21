@@ -240,14 +240,14 @@ class SksReportArtifact:
 
 
 def working_seconds(start: datetime, end: datetime) -> float:
-    """Return overlap with Moscow workdays 09:00–17:30, excluding weekends."""
+    """Return overlap with Moscow workdays 08:00–17:30, excluding weekends."""
     if end <= start:
         return 0.0
     total = 0.0
     current_day = start.date()
     while current_day <= end.date():
         if current_day.weekday() < 5:
-            work_start = datetime.combine(current_day, time(9, 0))
+            work_start = datetime.combine(current_day, time(8, 0))
             work_end = datetime.combine(current_day, time(17, 30))
             overlap_start = max(start, work_start)
             overlap_end = min(end, work_end)
@@ -862,7 +862,7 @@ def _build_task_sheet(workbook: Workbook, data: SksReportData, period: str) -> N
 
     sheet.append([None] * 7)
     note = sheet.append(
-        ["Рабочее время рассчитано по будням 09:00–17:30 (Москва); ночи и выходные исключены. Задачи с полной календарной длительностью 14 часов и более полностью исключены. Учитываются выполненные задачи, название которых содержит «Договор» или «Счет», но не содержит «ЭДО»; регистр, ё/е и лишние пробелы не влияют." ] + [None] * 6,
+        ["Рабочее время рассчитано по будням 08:00–17:30 (Москва); ночи и выходные исключены. Задачи с полной календарной длительностью 14 часов и более полностью исключены. Учитываются выполненные задачи, название которых содержит «Договор» или «Счет», но не содержит «ЭДО»; регистр, ё/е и лишние пробелы не влияют." ] + [None] * 6,
         STYLE["note"],
     )
     sheet.merges.append(f"A{note}:G{note}")
