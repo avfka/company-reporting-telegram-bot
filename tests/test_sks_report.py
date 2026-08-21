@@ -3,6 +3,8 @@ import zipfile
 from datetime import date, datetime
 from decimal import Decimal
 
+from PIL import Image
+
 from reporting_bot.sks_report import (
     AGREEMENT_SQL,
     ANOMALY_DURATION_DAYS,
@@ -12,6 +14,7 @@ from reporting_bot.sks_report import (
     TASK_DURATION_SQL,
     TaskMetric,
     _summary_values,
+    build_sks_chart,
     build_sks_workbook,
     working_seconds,
 )
@@ -88,6 +91,40 @@ def test_build_sks_workbook_creates_valid_xlsx_package() -> None:
     assert "Иванова Елена" in summary_xml
     assert "Договор и счет" in workbook_content
     assert "Аномалии" in workbook_xml
+
+
+def test_build_sks_chart_creates_readable_png() -> None:
+    metric = ProjectMetric(
+        project_id="project-1",
+        contract_number="СКС-1",
+        service="sout",
+        specialist="Иванова Елена",
+        start_at=datetime(2026, 7, 1, 9, 0),
+        target_at=datetime(2026, 7, 3, 12, 0),
+        duration_days=2.125,
+        sale_price=Decimal("125000.50"),
+    )
+    chart = build_sks_chart(
+        SksReportData(
+            date_from=date(2026, 7, 1),
+            date_to=date(2026, 7, 31),
+            agreements=(metric,),
+            sends=(metric,),
+            tasks=(
+                TaskMetric(
+                    category="Договор и счет",
+                    created_at=datetime(2026, 7, 1, 17, 0),
+                    closed_at=datetime(2026, 7, 2, 9, 30),
+                    working_seconds=3600,
+                ),
+            ),
+            sending_tasks={"Балакирева Диана": 3, "Кулешева Владислава": 4},
+        )
+    )
+
+    image = Image.open(io.BytesIO(chart))
+    assert image.format == "PNG"
+    assert image.size == (1200, 2000)
 
 
 def test_projects_over_200_days_are_excluded_only_from_time_statistics() -> None:

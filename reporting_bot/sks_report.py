@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import base64
+import io
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
+from functools import lru_cache
+from pathlib import Path
 from statistics import mean
 from typing import Iterable, Sequence
 
+from PIL import Image, ImageDraw, ImageFont
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import NullPool
 
@@ -224,6 +229,15 @@ class SksReportData:
     sending_tasks: dict[str, int]
 
 
+@dataclass(frozen=True)
+class SksReportArtifact:
+    workbook: bytes
+    workbook_filename: str
+    chart: bytes
+    chart_filename: str
+    caption: str
+
+
 def working_seconds(start: datetime, end: datetime) -> float:
     """Return overlap with Moscow workdays 09:00–17:30, excluding weekends."""
     if end <= start:
@@ -249,14 +263,20 @@ class SksReportService:
             "postgresql://", "postgresql+psycopg://", 1
         )
 
-    def create(self, date_from: date, date_to: date) -> tuple[bytes, str]:
+    def create(self, date_from: date, date_to: date) -> SksReportArtifact:
         if date_to < date_from:
             raise ValueError("Дата окончания не может быть раньше даты начала.")
         if (date_to - date_from).days > 366:
             raise ValueError("Максимальный период отчёта — 366 дней.")
         data = self._load(date_from, date_to)
-        filename = f"Отчет_СКС_{date_from.isoformat()}_{date_to.isoformat()}.xlsx"
-        return build_sks_workbook(data), filename
+        stem = f"Отчет_СКС_{date_from.isoformat()}_{date_to.isoformat()}"
+        return SksReportArtifact(
+            workbook=build_sks_workbook(data),
+            workbook_filename=stem + ".xlsx",
+            chart=build_sks_chart(data),
+            chart_filename=stem + ".png",
+            caption=f"<b>Отчёт СКС</b> · {date_from:%d.%m.%Y}–{date_to:%d.%m.%Y}",
+        )
 
     def _load(self, date_from: date, date_to: date) -> SksReportData:
         engine = create_engine(
@@ -379,6 +399,217 @@ def _excel_column(count: int) -> str:
         value, remainder = divmod(value - 1, 26)
         result = chr(65 + remainder) + result
     return result
+
+
+@lru_cache(maxsize=32)
+def _sks_font(size: int, bold: bool = False):
+    asset_name = "ks-report-bold.ttf.b64" if bold else "ks-report-regular.ttf.b64"
+    asset_path = Path(__file__).with_name("assets") / asset_name
+    try:
+        font_bytes = base64.b64decode(asset_path.read_text(encoding="ascii"))
+        return ImageFont.truetype(io.BytesIO(font_bytes), size)
+    except (OSError, ValueError):
+        return ImageFont.load_default(size=size)
+
+
+def _sks_days(value: object) -> str:
+    if value is None:
+        return "—"
+    return f"{float(value):.1f} дня".replace(".", ",")
+
+
+def _sks_money(value: Decimal | float | object) -> str:
+    number = float(value)
+    if abs(number) >= 1_000_000:
+        return f"{number / 1_000_000:.2f} млн ₽".replace(".", ",")
+    if abs(number) >= 1_000:
+        return f"{number / 1_000:.0f} тыс. ₽"
+    return f"{number:.0f} ₽"
+
+
+def _sks_time(seconds: float | None) -> str:
+    if seconds is None:
+        return "—"
+    rounded = max(0, round(seconds))
+    hours, remainder = divmod(rounded, 3600)
+    minutes, seconds_value = divmod(remainder, 60)
+    return f"{hours:d}:{minutes:02d}:{seconds_value:02d}"
+
+
+def _sks_plan_detail(actual: object, plan: object, *, lower_is_better: bool) -> tuple[str, str]:
+    difference = _variance(actual, plan, lower_is_better=lower_is_better)
+    if difference is None:
+        return "нет данных для сравнения", "#7A8998"
+    sign = "+" if difference >= 0 else ""
+    label = f"к плану {sign}{difference * 100:.0f}%"
+    return label, "#2E9C73" if difference >= 0 else "#C45A54"
+
+
+def _draw_sks_card(
+    draw: ImageDraw.ImageDraw,
+    box: tuple[int, int, int, int],
+    label: str,
+    value: str,
+    detail: str,
+    accent: str,
+    detail_color: str = "#7A8998",
+) -> None:
+    left, top, right, bottom = box
+    draw.rounded_rectangle(box, radius=18, fill="#F8FAFD", outline="#DCE5EF", width=2)
+    draw.rounded_rectangle((left, top, left + 8, bottom), radius=4, fill=accent)
+    draw.text((left + 22, top + 15), label, font=_sks_font(16), fill="#5B6B7C")
+    draw.text((left + 22, top + 44), value, font=_sks_font(27, True), fill="#173A5E")
+    draw.text((left + 22, top + 82), detail, font=_sks_font(13), fill=detail_color)
+
+
+def _draw_sks_duration_panel(
+    draw: ImageDraw.ImageDraw,
+    box: tuple[int, int, int, int],
+    data: SksReportData,
+) -> None:
+    left, top, right, bottom = box
+    blue = "#255985"
+    orange = "#E89A3C"
+    draw.rounded_rectangle(box, radius=20, fill="#F8FAFD", outline="#DCE5EF", width=2)
+    draw.text((left + 24, top + 18), "Скорость работы по специалистам", font=_sks_font(23, True), fill="#213547")
+    draw.text((left + 24, top + 51), "Среднее число календарных дней · без аномалий свыше 200 дней", font=_sks_font(14), fill="#7A8998")
+    draw.rounded_rectangle((right - 335, top + 24, right - 317, top + 42), radius=4, fill=blue)
+    draw.text((right - 308, top + 20), "Согласование", font=_sks_font(13), fill="#5B6B7C")
+    draw.rounded_rectangle((right - 180, top + 24, right - 162, top + 42), radius=4, fill=orange)
+    draw.text((right - 153, top + 20), "Отправка", font=_sks_font(13), fill="#5B6B7C")
+
+    rows: list[tuple[str, float | None, float | None]] = []
+    for name in (*PRIMARY_SPECIALISTS, SPECIAL_SPECIALIST):
+        values = _summary_values(data, (name,))
+        rows.append((name, values["agreement_days"], values["send_days"]))
+    maximum = max(
+        [PLAN_SEND_DAYS, 1.0]
+        + [float(value) for _, agreement, sending in rows for value in (agreement, sending) if value is not None]
+    )
+    chart_left = left + 270
+    chart_right = right - 70
+    chart_width = chart_right - chart_left
+    row_top = top + 95
+    row_height = 61
+    plan_x = chart_left + chart_width * min(1.0, PLAN_SEND_DAYS / maximum)
+    draw.line((plan_x, row_top - 8, plan_x, bottom - 38), fill="#AAB8C6", width=2)
+    draw.text((plan_x + 6, bottom - 32), "план отправки 4 дня", font=_sks_font(11), fill="#7A8998")
+    for index, (name, agreement, sending) in enumerate(rows):
+        y = row_top + index * row_height
+        draw.text((left + 24, y + 9), name, font=_sks_font(14, True), fill="#213547")
+        draw.line((chart_left, y + 14, chart_right, y + 14), fill="#E5EBF2", width=13)
+        draw.line((chart_left, y + 35, chart_right, y + 35), fill="#E5EBF2", width=13)
+        for value, bar_y, color in ((agreement, y + 14, blue), (sending, y + 35, orange)):
+            if value is None:
+                draw.text((chart_left + 5, bar_y - 9), "нет данных", font=_sks_font(11), fill="#98A7B6")
+                continue
+            end_x = chart_left + chart_width * min(1.0, float(value) / maximum)
+            draw.line((chart_left, bar_y, end_x, bar_y), fill=color, width=13)
+            label = f"{float(value):.1f}".replace(".", ",")
+            label_x = min(end_x + 8, chart_right + 8)
+            draw.text((label_x, bar_y - 10), label, font=_sks_font(12, True), fill=color)
+
+
+def _draw_sks_approval_panel(
+    draw: ImageDraw.ImageDraw,
+    box: tuple[int, int, int, int],
+    data: SksReportData,
+) -> None:
+    left, top, right, bottom = box
+    draw.rounded_rectangle(box, radius=20, fill="#F8FAFD", outline="#DCE5EF", width=2)
+    draw.text((left + 24, top + 18), "Согласованные отчёты", font=_sks_font(23, True), fill="#213547")
+    draw.text((left + 24, top + 51), "Стоимость проектов и количество переходов на целевой этап", font=_sks_font(14), fill="#7A8998")
+    rows: list[tuple[str, int, Decimal]] = []
+    for name in (*PRIMARY_SPECIALISTS, SPECIAL_SPECIALIST):
+        values = _summary_values(data, (name,))
+        rows.append((name, int(values["approved_count"]), values["approved_amount"]))
+    maximum = max([Decimal(1)] + [amount for _, _, amount in rows])
+    chart_left = left + 270
+    chart_right = right - 175
+    chart_width = chart_right - chart_left
+    row_top = top + 95
+    row_height = 54
+    colors = ("#255985", "#2E7896", "#35949A", "#2E9C73", "#75A85A", "#D39A3E", "#8A6CAB")
+    for index, (name, count, amount) in enumerate(rows):
+        y = row_top + index * row_height
+        color = colors[index % len(colors)]
+        draw.text((left + 24, y + 5), name, font=_sks_font(14, True), fill="#213547")
+        draw.line((chart_left, y + 15, chart_right, y + 15), fill="#E5EBF2", width=18)
+        if amount > 0:
+            end_x = chart_left + chart_width * float(amount / maximum)
+            draw.line((chart_left, y + 15, end_x, y + 15), fill=color, width=18)
+        draw.text((chart_right + 16, y + 4), _sks_money(amount), font=_sks_font(13, True), fill="#173A5E")
+        badge = f"{count} шт."
+        badge_box = draw.textbbox((0, 0), badge, font=_sks_font(12, True))
+        badge_width = badge_box[2] - badge_box[0] + 18
+        draw.rounded_rectangle((right - badge_width - 20, y, right - 20, y + 30), radius=10, fill="#EAF0F6")
+        draw.text((right - badge_width - 11, y + 5), badge, font=_sks_font(12, True), fill="#5B6B7C")
+
+
+def build_sks_chart(data: SksReportData) -> bytes:
+    image = Image.new("RGB", (1200, 2000), "#F4F7FB")
+    draw = ImageDraw.Draw(image)
+    blue = "#255985"
+    orange = "#E89A3C"
+    green = "#2E9C73"
+    purple = "#7C5AA6"
+    draw.rounded_rectangle((45, 35, 1155, 1965), radius=30, fill="#FFFFFF", outline="#DCE5EF", width=2)
+    draw.text((85, 70), "СКС · Итоги работы", font=_sks_font(41, True), fill="#173A5E")
+    draw.text((85, 126), f"{data.date_from:%d.%m.%Y}–{data.date_to:%d.%m.%Y} · данные CRM", font=_sks_font(21), fill="#5B6B7C")
+
+    primary = _summary_values(data, PRIMARY_SPECIALISTS)
+    task_average = _average(task.working_seconds for task in data.tasks)
+    all_send_average = _average(row.duration_days for row in _duration_rows(data.sends))
+    send_detail, send_color = _sks_plan_detail(primary["send_days"], PLAN_SEND_DAYS, lower_is_better=True)
+    task_detail, task_color = _sks_plan_detail(task_average, PLAN_TASK_SECONDS, lower_is_better=True)
+    count_detail, count_color = _sks_plan_detail(primary["approved_count"], PLAN_APPROVED_COUNT, lower_is_better=False)
+    amount_detail, amount_color = _sks_plan_detail(primary["approved_amount"], PLAN_APPROVED_AMOUNT, lower_is_better=False)
+    all_send_detail, all_send_color = _sks_plan_detail(all_send_average, PLAN_SEND_DAYS, lower_is_better=True)
+    cards = (
+        ("Согласование · 6 спец.", _sks_days(primary["agreement_days"]), "среднее за период", blue, "#7A8998"),
+        ("Отправка · 6 спец.", _sks_days(primary["send_days"]), send_detail, orange, send_color),
+        ("Отправка · все СКС", _sks_days(all_send_average), all_send_detail, purple, all_send_color),
+        ("Задачи · договор/счет", _sks_time(task_average), task_detail, green, task_color),
+        ("Согласовано", f"{primary['approved_count']} шт.", count_detail, blue, count_color),
+        ("Сумма согласованных", _sks_money(primary["approved_amount"]), amount_detail, orange, amount_color),
+    )
+    for index, card in enumerate(cards):
+        column = index % 3
+        row = index // 3
+        left = 85 + column * 350
+        top = 178 + row * 130
+        _draw_sks_card(draw, (left, top, left + 330, top + 112), *card)
+
+    _draw_sks_duration_panel(draw, (85, 455, 1105, 1025), data)
+    _draw_sks_approval_panel(draw, (85, 1050, 1105, 1555), data)
+
+    primary_agreements = _subset(data.agreements, PRIMARY_SPECIALISTS)
+    sout_rows = [row for row in primary_agreements if row.service == "sout"]
+    other_rows = [row for row in primary_agreements if row.service != "sout"]
+    anomaly_agreement = len(_anomaly_rows(primary_agreements))
+    anomaly_send = len(_anomaly_rows(data.sends))
+    sending_diana = data.sending_tasks.get("Балакирева Диана", 0)
+    sending_vladislava = data.sending_tasks.get("Кулешева Владислава", 0)
+    operational_cards = (
+        ("СОУТ · согласовано", f"{len(sout_rows)} шт.", _sks_money(sum((row.sale_price for row in sout_rows), Decimal(0))), blue),
+        ("Другие услуги", f"{len(other_rows)} шт.", _sks_money(sum((row.sale_price for row in other_rows), Decimal(0))), green),
+        ("Задачи «отправка»", f"{sending_diana + sending_vladislava} шт.", f"Балакирева {sending_diana} · Кулешева {sending_vladislava}", orange),
+        ("Аномалии > 200 дней", f"{anomaly_agreement + anomaly_send} записей", f"согласование {anomaly_agreement} · отправка {anomaly_send}", purple),
+    )
+    draw.text((85, 1590), "Операционный контроль", font=_sks_font(23, True), fill="#213547")
+    for index, (label, value, detail, accent) in enumerate(operational_cards):
+        left = 85 + index * 255
+        _draw_sks_card(draw, (left, 1635, left + 245, 1755), label, value, detail, accent)
+
+    draw.rounded_rectangle((85, 1790, 1105, 1908), radius=18, fill="#F1F5F9")
+    draw.text((108, 1810), "Как читать показатели", font=_sks_font(17, True), fill="#213547")
+    draw.text((108, 1841), "• Положительный процент означает результат лучше плана. План применяется к выбранному периоду без пересчёта.", font=_sks_font(14), fill="#5B6B7C")
+    draw.text((108, 1868), "• Проекты свыше 200 дней исключены только из средних сроков; в количестве и сумме они сохранены.", font=_sks_font(14), fill="#5B6B7C")
+    draw.text((85, 1923), "EcoStar Reports · подробности и список проектов — в Excel", font=_sks_font(16), fill="#7A8998")
+
+    output = io.BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    return output.getvalue()
 
 
 def build_sks_workbook(data: SksReportData) -> bytes:
