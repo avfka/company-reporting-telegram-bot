@@ -137,6 +137,13 @@ class ReportingBotApp:
                     artifact.chart_filename,
                     artifact.caption,
                 )
+                for chart in artifact.detail_charts:
+                    await telegram.send_photo(
+                        chat_id,
+                        chart.content,
+                        chart.filename,
+                        chart.caption,
+                    )
                 await telegram.send_document(
                     chat_id,
                     artifact.workbook,

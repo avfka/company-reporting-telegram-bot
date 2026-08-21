@@ -187,12 +187,20 @@ class DotaReportData:
 
 
 @dataclass(frozen=True)
+class DotaChartArtifact:
+    content: bytes
+    filename: str
+    caption: str
+
+
+@dataclass(frozen=True)
 class DotaReportArtifact:
     workbook: bytes
     workbook_filename: str
     chart: bytes
     chart_filename: str
     caption: str
+    detail_charts: tuple[DotaChartArtifact, ...] = ()
 
 
 class DotaReportService:
@@ -212,12 +220,14 @@ class DotaReportService:
         previous_date_to = _previous_month_date(date_to)
         data = self._load(date_from, date_to, previous_date_from, previous_date_to)
         stem = f"Отчет_ДОТ_{date_from.isoformat()}_{date_to.isoformat()}"
+        detail_charts = build_dota_detail_charts(data, stem)
         return DotaReportArtifact(
             workbook=build_dota_workbook(data),
             workbook_filename=stem + ".xlsx",
             chart=build_dota_chart(data),
             chart_filename=stem + ".png",
             caption=f"<b>Отчёт ДОТ</b> · {date_from:%d.%m.%Y}–{date_to:%d.%m.%Y}",
+            detail_charts=detail_charts,
         )
 
     def _load(
@@ -846,6 +856,305 @@ def _draw_dota_daily_panel(
 
 def _dota_number(value: float) -> str:
     return f"{value:,.0f}".replace(",", " ")
+
+
+def _dota_compact(value: float, *, money: bool = False) -> str:
+    absolute = abs(value)
+    if absolute >= 1_000_000:
+        result = f"{value / 1_000_000:.1f}м".replace(".0м", "м").replace(".", ",")
+    elif absolute >= 1_000:
+        result = f"{value / 1_000:.0f}к"
+    else:
+        result = f"{value:.0f}"
+    return result + (" ₽" if money else "")
+
+
+def _dota_breakdown_rows(
+    rows: Sequence[DotaEvent],
+    label_getter,
+    *,
+    max_items: int = 4,
+) -> list[tuple[str, Decimal, int, int]]:
+    totals: dict[str, tuple[Decimal, int, int]] = {}
+    for row in rows:
+        label = str(label_getter(row) or "—")
+        amount, projects, workplaces = totals.get(label, (Decimal(0), 0, 0))
+        totals[label] = (amount + row.amount, projects + 1, workplaces + row.workplace_count)
+    ranked = sorted(
+        ((label, *values) for label, values in totals.items() if values[0] > 0),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    if len(ranked) <= max_items:
+        return ranked
+    remaining = ranked[max_items:]
+    return [
+        *ranked[:max_items],
+        (
+            "Остальные",
+            sum((row[1] for row in remaining), Decimal(0)),
+            sum(row[2] for row in remaining),
+            sum(row[3] for row in remaining),
+        ),
+    ]
+
+
+def _draw_right_text(
+    draw: ImageDraw.ImageDraw,
+    right: int,
+    y: int,
+    text_value: str,
+    font,
+    fill: str,
+) -> None:
+    bounds = draw.textbbox((0, 0), text_value, font=font)
+    draw.text((right - (bounds[2] - bounds[0]), y), text_value, font=font, fill=fill)
+
+
+def _build_dota_donut_detail(
+    data: DotaReportData,
+    *,
+    category: str,
+    title: str,
+    subtitle: str,
+    label_getter,
+    include_workplaces: bool,
+) -> bytes:
+    image = Image.new("RGB", (1200, 900), "#F1F4F8")
+    draw = ImageDraw.Draw(image)
+    navy = "#173A5E"
+    colors = ("#F47C2B", "#FFBC28", "#70AD47", "#A84D0B", "#4E88B5")
+    draw.rounded_rectangle((38, 32, 1162, 866), radius=28, fill="#FFFFFF", outline="#D5DEE8", width=2)
+    draw.text((78, 68), title, font=_dota_font(38, True), fill=navy)
+    draw.text((78, 118), subtitle, font=_dota_font(20), fill="#5B6B7C")
+    draw.text(
+        (78, 151),
+        f"Период: {data.date_from:%d.%m.%Y}–{data.date_to:%d.%m.%Y}",
+        font=_dota_font(17),
+        fill="#7A8998",
+    )
+
+    launches = _events(data.events, "Запуск", category)
+    rows = _dota_breakdown_rows(launches, label_getter)
+    total = sum((row[1] for row in rows), Decimal(0))
+    pie_box = (92, 225, 612, 745)
+    if total:
+        angle = -90.0
+        for index, (_, amount, _, _) in enumerate(rows):
+            next_angle = angle + 360.0 * float(amount / total)
+            draw.pieslice(
+                pie_box,
+                start=angle,
+                end=next_angle,
+                fill=colors[index % len(colors)],
+                outline="#FFFFFF",
+                width=5,
+            )
+            angle = next_angle
+        draw.ellipse((237, 370, 467, 600), fill="#FFFFFF")
+        total_label = _dota_money(total)
+        bounds = draw.textbbox((0, 0), total_label, font=_dota_font(27, True))
+        draw.text((352 - (bounds[2] - bounds[0]) / 2, 446), total_label, font=_dota_font(27, True), fill=navy)
+        count_label = f"{len(launches)} проектов"
+        bounds = draw.textbbox((0, 0), count_label, font=_dota_font(17))
+        draw.text((352 - (bounds[2] - bounds[0]) / 2, 486), count_label, font=_dota_font(17), fill="#6B7A89")
+    else:
+        draw.ellipse(pie_box, fill="#E5EBF2")
+        draw.ellipse((237, 370, 467, 600), fill="#FFFFFF")
+        draw.text((273, 470), "Нет данных", font=_dota_font(22, True), fill="#7A8998")
+
+    table_left, table_top, table_right = 650, 220, 1122
+    draw.rounded_rectangle((table_left, table_top, table_right, 758), radius=18, fill="#F8FAFD", outline="#DCE5EF", width=2)
+    draw.rounded_rectangle((table_left, table_top, table_right, table_top + 62), radius=18, fill=navy)
+    draw.rectangle((table_left, table_top + 44, table_right, table_top + 62), fill=navy)
+    draw.text((table_left + 20, table_top + 19), "Структура запусков", font=_dota_font(19, True), fill="#FFFFFF")
+    columns_y = table_top + 83
+    draw.text((table_left + 20, columns_y), "Отдел" if include_workplaces else "Компания", font=_dota_font(14, True), fill="#657587")
+    _draw_right_text(draw, table_left + 326, columns_y, "Деньги", _dota_font(14, True), "#657587")
+    _draw_right_text(draw, table_left + 396, columns_y, "Проекты", _dota_font(14, True), "#657587")
+    _draw_right_text(draw, table_right - 20, columns_y, "РМ" if include_workplaces else "Доля", _dota_font(14, True), "#657587")
+    draw.line((table_left + 18, columns_y + 28, table_right - 18, columns_y + 28), fill="#DCE5EF", width=1)
+    for index, (label, amount, projects, workplaces) in enumerate(rows):
+        y = columns_y + 48 + index * 70
+        color = colors[index % len(colors)]
+        draw.rounded_rectangle((table_left + 20, y + 2, table_left + 36, y + 18), radius=4, fill=color)
+        display = label if len(label) <= 20 else label[:19] + "…"
+        draw.text((table_left + 47, y), display, font=_dota_font(16, True), fill="#213547")
+        _draw_right_text(draw, table_left + 326, y, _dota_money(amount), _dota_font(15), "#34495E")
+        _draw_right_text(draw, table_left + 396, y, str(projects), _dota_font(15), "#34495E")
+        last_value = str(workplaces) if include_workplaces else (f"{float(amount / total) * 100:.0f}%" if total else "0%")
+        _draw_right_text(draw, table_right - 20, y, last_value, _dota_font(15, True), navy)
+        if index < len(rows) - 1:
+            draw.line((table_left + 20, y + 42, table_right - 20, y + 42), fill="#E8EDF3", width=1)
+
+    draw.text((78, 818), "EcoStar Reports · данные CRM", font=_dota_font(16), fill="#8291A1")
+    output = io.BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    return output.getvalue()
+
+
+def _draw_dota_dark_daily_panel(
+    draw: ImageDraw.ImageDraw,
+    box: tuple[int, int, int, int],
+    title: str,
+    dates: Sequence[date],
+    launch: Sequence[float],
+    release: Sequence[float],
+    *,
+    money: bool,
+) -> None:
+    left, top, right, bottom = box
+    launch_fill, launch_outline = "#203D58", "#4DB7F0"
+    release_fill, release_outline = "#5B3A20", "#F29B38"
+    draw.rounded_rectangle(box, radius=18, fill="#333536", outline="#5A5E62", width=2)
+    draw.text((left + 24, top + 19), title, font=_dota_font(22, True), fill="#F5F7FA")
+    legend_y = top + 25
+    draw.rounded_rectangle((right - 310, legend_y, right - 288, legend_y + 16), radius=3, fill=launch_fill, outline=launch_outline, width=2)
+    draw.text((right - 278, top + 18), "Запуск", font=_dota_font(14), fill="#D9E0E7")
+    draw.rounded_rectangle((right - 165, legend_y, right - 143, legend_y + 16), radius=3, fill=release_fill, outline=release_outline, width=2)
+    draw.text((right - 133, top + 18), "Выпуск", font=_dota_font(14), fill="#D9E0E7")
+
+    chart_left, chart_right = left + 82, right - 32
+    chart_top, chart_bottom = top + 76, bottom - 50
+    maximum = max([*launch, *release, 1.0])
+    for step in range(5):
+        y = int(chart_bottom - (chart_bottom - chart_top) * step / 4)
+        draw.line((chart_left, y, chart_right, y), fill="#55595D", width=1)
+        value = maximum * step / 4
+        label = _dota_compact(value, money=money)
+        _draw_right_text(draw, chart_left - 10, y - 8, label, _dota_font(11), "#AEB7C0")
+    if not dates:
+        draw.text((left + 520, top + 160), "Нет данных за период", font=_dota_font(18), fill="#AEB7C0")
+        return
+
+    group_width = (chart_right - chart_left) / len(dates)
+    bar_width = max(2, min(16, int(group_width * 0.32)))
+    label_every = max(1, (len(dates) + 13) // 14)
+    chart_height = chart_bottom - chart_top - 12
+    for index, current_date in enumerate(dates):
+        center = chart_left + group_width * (index + 0.5)
+        values = (
+            (launch[index], int(center - bar_width - 1), launch_fill, launch_outline),
+            (release[index], int(center + 1), release_fill, release_outline),
+        )
+        for value, x, fill, outline in values:
+            height = int(chart_height * value / maximum)
+            if not height:
+                continue
+            draw.rounded_rectangle((x, chart_bottom - height, x + bar_width, chart_bottom), radius=2, fill=fill, outline=outline, width=2)
+            if group_width >= 28:
+                label = _dota_compact(value, money=money)
+                bounds = draw.textbbox((0, 0), label, font=_dota_font(10, True))
+                label_x = x + bar_width / 2 - (bounds[2] - bounds[0]) / 2
+                draw.text((label_x, chart_bottom - height - 18), label, font=_dota_font(10, True), fill="#F2F4F6")
+        if index % label_every == 0 or index == len(dates) - 1:
+            label = current_date.strftime("%d.%m")
+            bounds = draw.textbbox((0, 0), label, font=_dota_font(11))
+            draw.text((center - (bounds[2] - bounds[0]) / 2, chart_bottom + 12), label, font=_dota_font(11), fill="#C3CAD1")
+
+
+def _build_dota_movement_detail(
+    data: DotaReportData,
+    *,
+    category: str,
+    title: str,
+    include_workplaces: bool,
+) -> bytes:
+    panel_count = 3 if include_workplaces else 2
+    height = 1310 if include_workplaces else 980
+    image = Image.new("RGB", (1400, height), "#242526")
+    draw = ImageDraw.Draw(image)
+    draw.text((62, 48), title, font=_dota_font(38, True), fill="#FFFFFF")
+    draw.text(
+        (62, 98),
+        f"Динамика по календарным дням · {data.date_from:%d.%m.%Y}–{data.date_to:%d.%m.%Y}",
+        font=_dota_font(19),
+        fill="#B9C0C7",
+    )
+
+    category_rows = [row for row in data.events if row.category == category]
+    launches = _events(category_rows, "Запуск")
+    releases = _events(category_rows, "Выпуск")
+    cards = (
+        ("Запуск, руб.", _dota_money(_sum_amount(launches)), "#4DB7F0"),
+        ("Выпуск, руб.", _dota_money(_sum_amount(releases)), "#F29B38"),
+        ("Запущено проектов", str(len(launches)), "#4DB7F0"),
+        ("Выпущено проектов", str(len(releases)), "#F29B38"),
+    )
+    for index, (label, value, accent) in enumerate(cards):
+        left = 62 + index * 324
+        draw.rounded_rectangle((left, 148, left + 300, 254), radius=12, fill="#333536", outline="#565A5E", width=2)
+        draw.rectangle((left, 148, left + 7, 254), fill=accent)
+        draw.text((left + 22, 165), label, font=_dota_font(15), fill="#B9C0C7")
+        draw.text((left + 22, 198), value, font=_dota_font(26, True), fill="#FFFFFF")
+
+    dates, money_launch, money_release = _dota_daily_series(data, lambda row: row.amount, category=category)
+    _, project_launch, project_release = _dota_daily_series(data, lambda row: 1, category=category)
+    panels = [
+        ("Деньги по дням, руб.", money_launch, money_release, True),
+        ("Проекты по дням, шт.", project_launch, project_release, False),
+    ]
+    if include_workplaces:
+        _, rm_launch, rm_release = _dota_daily_series(data, lambda row: row.workplace_count, category=category)
+        panels.append(("Рабочие места по дням, РМ", rm_launch, rm_release, False))
+    for index, (panel_title, launch, release, money) in enumerate(panels):
+        top = 286 + index * 322
+        _draw_dota_dark_daily_panel(draw, (62, top, 1338, top + 292), panel_title, dates, launch, release, money=money)
+
+    draw.text((62, height - 37), "EcoStar Reports · данные CRM", font=_dota_font(15), fill="#8C949C")
+    output = io.BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    return output.getvalue()
+
+
+def build_dota_detail_charts(data: DotaReportData, stem: str) -> tuple[DotaChartArtifact, ...]:
+    period = f"{data.date_from:%d.%m.%Y}–{data.date_to:%d.%m.%Y}"
+    return (
+        DotaChartArtifact(
+            content=_build_dota_donut_detail(
+                data,
+                category="ОПР",
+                title="ОПР · Запуски по отделам",
+                subtitle="Доля выручки, проекты и рабочие места",
+                label_getter=lambda row: row.manager_department,
+                include_workplaces=True,
+            ),
+            filename=stem + "_ОПР_доли.png",
+            caption=f"<b>ДОТ · ОПР — доли запусков</b> · {period}",
+        ),
+        DotaChartArtifact(
+            content=_build_dota_donut_detail(
+                data,
+                category="Обучение",
+                title="Обучение · Запуски по компаниям",
+                subtitle="Доля выручки и количество проектов",
+                label_getter=lambda row: row.company_name,
+                include_workplaces=False,
+            ),
+            filename=stem + "_Обучение_доли.png",
+            caption=f"<b>ДОТ · Обучение — доли запусков</b> · {period}",
+        ),
+        DotaChartArtifact(
+            content=_build_dota_movement_detail(
+                data,
+                category="ОПР",
+                title="ОПР · Движение по дням",
+                include_workplaces=True,
+            ),
+            filename=stem + "_ОПР_по_дням.png",
+            caption=f"<b>ДОТ · ОПР — движение по дням</b> · {period}",
+        ),
+        DotaChartArtifact(
+            content=_build_dota_movement_detail(
+                data,
+                category="Обучение",
+                title="Обучение · Движение по дням",
+                include_workplaces=False,
+            ),
+            filename=stem + "_Обучение_по_дням.png",
+            caption=f"<b>ДОТ · Обучение — движение по дням</b> · {period}",
+        ),
+    )
 
 
 def build_dota_chart(data: DotaReportData) -> bytes:

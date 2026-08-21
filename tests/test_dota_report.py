@@ -15,6 +15,7 @@ from reporting_bot.dota_report import (
     _parse_monthly_plans,
     _previous_month_date,
     build_dota_chart,
+    build_dota_detail_charts,
     build_dota_workbook,
 )
 
@@ -162,3 +163,31 @@ def test_dota_infographic_uses_daily_values_and_groups_small_pie_slices() -> Non
     assert dates == [date(2026, 8, day) for day in range(1, 5)]
     assert launch == [100.0, 200.0, 300.0, 400.0]
     assert release == [0.0, 0.0, 0.0, 0.0]
+
+
+def test_dota_builds_four_separate_detail_charts() -> None:
+    data = DotaReportData(
+        date_from=date(2026, 8, 1),
+        date_to=date(2026, 8, 4),
+        previous_date_from=date(2026, 7, 1),
+        previous_date_to=date(2026, 7, 4),
+        events=(
+            event("Запуск", "ОПР", "opr-launch", datetime(2026, 8, 1, 10)),
+            event("Выпуск", "ОПР", "opr-release", datetime(2026, 8, 2, 10)),
+            event("Запуск", "Обучение", "training-launch", datetime(2026, 8, 3, 10)),
+            event("Выпуск", "Обучение", "training-release", datetime(2026, 8, 4, 10)),
+        ),
+        previous_events=(),
+    )
+
+    charts = build_dota_detail_charts(data, "Отчет_ДОТ")
+
+    assert len(charts) == 4
+    assert [chart.filename for chart in charts] == [
+        "Отчет_ДОТ_ОПР_доли.png",
+        "Отчет_ДОТ_Обучение_доли.png",
+        "Отчет_ДОТ_ОПР_по_дням.png",
+        "Отчет_ДОТ_Обучение_по_дням.png",
+    ]
+    sizes = [Image.open(io.BytesIO(chart.content)).size for chart in charts]
+    assert sizes == [(1200, 900), (1200, 900), (1400, 1310), (1400, 980)]
