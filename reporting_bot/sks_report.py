@@ -29,6 +29,7 @@ PLAN_SEND_DAYS = 4.0
 PLAN_TASK_SECONDS = 30 * 60
 PLAN_APPROVED_COUNT = 43
 PLAN_APPROVED_AMOUNT = Decimal("1500000")
+ANOMALY_DURATION_DAYS = 200.0
 
 SERVICE_LABELS = {
     "sout": "СОУТ",
@@ -62,7 +63,7 @@ WITH target_candidates AS (
   WHERE h.created_at >= CAST(:date_from AS DATE)
     AND h.created_at < CAST(:date_to_exclusive AS DATE)
     AND (
-      (p.service = 'sout' AND h.new_step = 'Актуализировать РМ / Прикрепить декларацию')
+      (p.service = 'sout' AND h.new_step LIKE 'Актуализировать РМ%')
       OR
       (COALESCE(p.service, '') <> 'sout' AND h.new_step = 'Распечатка')
     )
@@ -112,7 +113,7 @@ WITH target_candidates AS (
   WHERE h.created_at >= CAST(:date_from AS DATE)
     AND h.created_at < CAST(:date_to_exclusive AS DATE)
     AND (
-      (p.service = 'sout' AND h.new_step = 'Выгрузить протоколы в ФСА')
+      (p.service = 'sout' AND h.new_step LIKE 'Выгрузить протоколы%ФСА')
       OR
       (COALESCE(p.service, '') <> 'sout' AND h.new_step = 'Закрыть проект')
     )
@@ -169,7 +170,11 @@ SELECT
   created_at,
   closed_at
 FROM completed_tasks
-WHERE normalized_title IN ('договор', 'договор и счет', 'счет и договор', 'счет')
+WHERE (
+    normalized_title LIKE '%договор%'
+    OR normalized_title LIKE '%счет%'
+  )
+  AND normalized_title NOT LIKE '%эдо%'
 ORDER BY closed_at
 """
 
@@ -327,6 +332,14 @@ def _average(values: Iterable[float]) -> float | None:
     return mean(materialized) if materialized else None
 
 
+def _duration_rows(rows: Iterable[ProjectMetric]) -> list[ProjectMetric]:
+    return [row for row in rows if row.duration_days <= ANOMALY_DURATION_DAYS]
+
+
+def _anomaly_rows(rows: Iterable[ProjectMetric]) -> list[ProjectMetric]:
+    return [row for row in rows if row.duration_days > ANOMALY_DURATION_DAYS]
+
+
 def _variance(actual: float | Decimal | None, plan: float | Decimal, *, lower_is_better: bool) -> float | None:
     if actual is None or float(plan) == 0:
         return None
@@ -344,8 +357,8 @@ def _summary_values(data: SksReportData, names: Iterable[str]) -> dict[str, obje
     agreements = _subset(data.agreements, names)
     sends = _subset(data.sends, names)
     return {
-        "agreement_days": _average(row.duration_days for row in agreements),
-        "send_days": _average(row.duration_days for row in sends),
+        "agreement_days": _average(row.duration_days for row in _duration_rows(agreements)),
+        "send_days": _average(row.duration_days for row in _duration_rows(sends)),
         "approved_count": len(agreements),
         "approved_amount": sum((row.sale_price for row in agreements), Decimal(0)),
     }
@@ -377,6 +390,7 @@ def build_sks_workbook(data: SksReportData) -> bytes:
     _build_task_sheet(workbook, data, period)
     _build_detail_sheet(workbook, "Проекты — согласование", data.agreements, period)
     _build_detail_sheet(workbook, "Проекты — отправка", data.sends, period)
+    _build_anomaly_sheet(workbook, data, period)
     return workbook.to_bytes()
 
 
@@ -447,12 +461,54 @@ def _build_summary_sheet(workbook: Workbook, data: SksReportData, period: str) -
         )
 
     sheet.append([None] * 8)
-    sheet.append(["Отправка · все специалисты СКС, включая агентский канал"] + [None] * 7, STYLE["section"])
+    sheet.append(["Контроль согласованных отчётов · основные 6 специалистов"] + [None] * 7, STYLE["section"])
     sheet.merges.append(f"A{len(sheet.rows)}:H{len(sheet.rows)}")
-    all_send_avg = _average(row.duration_days for row in data.sends)
     sheet.append(
-        ["Все услуги", len(data.sends), all_send_avg if all_send_avg is not None else "—", _variance(all_send_avg, PLAN_SEND_DAYS, lower_is_better=True), "проектов", None, None, None],
-        [STYLE["total_text"], STYLE["total_number"], STYLE["total_days"], STYLE["total_percent"], STYLE["total_text"], STYLE["base"], STYLE["base"], STYLE["base"]],
+        ["Категория", "Проектов, шт.", "Сумма, руб.", "Среднее, дни", "Аномалий > 200 дней", None, None, None],
+        STYLE["table_header"],
+    )
+    primary_agreements = _subset(data.agreements, PRIMARY_SPECIALISTS)
+    for label, rows in (
+        ("СОУТ", [row for row in primary_agreements if row.service == "sout"]),
+        ("Другие услуги", [row for row in primary_agreements if row.service != "sout"]),
+        ("Итого", primary_agreements),
+    ):
+        valid_rows = _duration_rows(rows)
+        total = label == "Итого"
+        sheet.append(
+            [
+                label,
+                len(rows),
+                sum((row.sale_price for row in rows), Decimal(0)),
+                _average(row.duration_days for row in valid_rows) if valid_rows else "—",
+                len(_anomaly_rows(rows)),
+                None,
+                None,
+                None,
+            ],
+            [
+                STYLE["total_text"] if total else STYLE["table_text"],
+                STYLE["total_number"] if total else STYLE["table_number"],
+                STYLE["total_money"] if total else STYLE["table_money"],
+                STYLE["total_days"] if total else STYLE["table_days"],
+                STYLE["total_number"] if total else STYLE["table_number"],
+                STYLE["base"],
+                STYLE["base"],
+                STYLE["base"],
+            ],
+        )
+
+    sheet.append([None] * 8)
+    sheet.append(["Отправка · все специалисты СКС, включая агентский канал · за выбранный период"] + [None] * 7, STYLE["section"])
+    sheet.merges.append(f"A{len(sheet.rows)}:H{len(sheet.rows)}")
+    sheet.append(
+        ["Услуги", "Проектов, шт.", "Среднее, дни", "% к плану 4 дня", "Единица", "Контроль", None, None],
+        STYLE["table_header"],
+    )
+    all_send_avg = _average(row.duration_days for row in _duration_rows(data.sends))
+    sheet.append(
+        ["Все услуги", len(data.sends), all_send_avg if all_send_avg is not None else "—", _variance(all_send_avg, PLAN_SEND_DAYS, lower_is_better=True), "проектов", f"Аномалий: {len(_anomaly_rows(data.sends))}", None, None],
+        [STYLE["total_text"], STYLE["total_number"], STYLE["total_days"], STYLE["total_percent"], STYLE["total_text"], STYLE["total_text"], STYLE["base"], STYLE["base"]],
     )
 
     sheet.append([None] * 8)
@@ -467,7 +523,7 @@ def _build_summary_sheet(workbook: Workbook, data: SksReportData, period: str) -
     sheet.append([None] * 8)
     note_row = sheet.append(
         [
-            "Отклонение: положительное значение означает выполнение лучше плана. Для времени меньше — лучше; для количества и суммы больше — лучше. План применяется к выбранному периоду без пересчёта.",
+            "Отклонение: положительное значение означает выполнение лучше плана. Длительности свыше 200 дней отмечаются как аномалии и не входят в показатели времени, но проекты и их стоимость сохраняются в количестве и суммах. План применяется к выбранному периоду без пересчёта.",
             None, None, None, None, None, None, None,
         ],
         STYLE["note"],
@@ -488,10 +544,10 @@ def _build_metric_sheet(
     include_all_total: bool = False,
 ) -> None:
     sheet = workbook.add_sheet(title)
-    _title(sheet, title, period, 7)
-    sheet.append([None] * 7)
+    _title(sheet, title, period, 8)
+    sheet.append([None] * 8)
     sheet.append(
-        ["Специалист", "Услуга", "Проектов, шт.", "Среднее, дни", "Минимум, дни", "Максимум, дни", "Сумма проектов, руб."],
+        ["Специалист", "Услуга", "Проектов, шт.", "Аномалий > 200 дней", "Среднее, дни", "Минимум, дни", "Максимум, дни", "Сумма проектов, руб."],
         STYLE["table_header"],
     )
     groups: dict[tuple[str, str], list[ProjectMetric]] = defaultdict(list)
@@ -506,31 +562,31 @@ def _build_metric_sheet(
             key=lambda item: item[0],
         )
         if not specialist_groups:
-            sheet.append([specialist, "—", 0, "—", "—", "—", 0], [STYLE["table_text"], STYLE["table_text"], STYLE["table_number"], STYLE["table_days"], STYLE["table_days"], STYLE["table_days"], STYLE["table_money"]])
+            sheet.append([specialist, "—", 0, 0, "—", "—", "—", 0], [STYLE["table_text"], STYLE["table_text"], STYLE["table_number"], STYLE["table_number"], STYLE["table_days"], STYLE["table_days"], STYLE["table_days"], STYLE["table_money"]])
             continue
         for service, values in specialist_groups:
-            durations = [value.duration_days for value in values]
+            durations = [value.duration_days for value in _duration_rows(values)]
             sheet.append(
-                [specialist, service, len(values), mean(durations), min(durations), max(durations), sum((value.sale_price for value in values), Decimal(0))],
-                [STYLE["table_text"], STYLE["table_text"], STYLE["table_number"], STYLE["table_days"], STYLE["table_days"], STYLE["table_days"], STYLE["table_money"]],
+                [specialist, service, len(values), len(_anomaly_rows(values)), mean(durations) if durations else "—", min(durations) if durations else "—", max(durations) if durations else "—", sum((value.sale_price for value in values), Decimal(0))],
+                [STYLE["table_text"], STYLE["table_text"], STYLE["table_number"], STYLE["table_number"], STYLE["table_days"], STYLE["table_days"], STYLE["table_days"], STYLE["table_money"]],
             )
 
     if include_primary_total:
         primary = _subset(rows, PRIMARY_SPECIALISTS)
-        durations = [row.duration_days for row in primary]
+        durations = [row.duration_days for row in _duration_rows(primary)]
         sheet.append(
-            ["Итого 6 специалистов", "Все услуги", len(primary), mean(durations) if durations else "—", min(durations) if durations else "—", max(durations) if durations else "—", sum((row.sale_price for row in primary), Decimal(0))],
-            [STYLE["total_text"], STYLE["total_text"], STYLE["total_number"], STYLE["total_days"], STYLE["total_days"], STYLE["total_days"], STYLE["total_money"]],
+            ["Итого 6 специалистов", "Все услуги", len(primary), len(_anomaly_rows(primary)), mean(durations) if durations else "—", min(durations) if durations else "—", max(durations) if durations else "—", sum((row.sale_price for row in primary), Decimal(0))],
+            [STYLE["total_text"], STYLE["total_text"], STYLE["total_number"], STYLE["total_number"], STYLE["total_days"], STYLE["total_days"], STYLE["total_days"], STYLE["total_money"]],
         )
     if include_all_total:
-        durations = [row.duration_days for row in rows]
+        durations = [row.duration_days for row in _duration_rows(rows)]
         sheet.append(
-            ["Все СКС + агентский канал", "Все услуги", len(rows), mean(durations) if durations else "—", min(durations) if durations else "—", max(durations) if durations else "—", sum((row.sale_price for row in rows), Decimal(0))],
-            [STYLE["total_text"], STYLE["total_text"], STYLE["total_number"], STYLE["total_days"], STYLE["total_days"], STYLE["total_days"], STYLE["total_money"]],
+            ["Все СКС + агентский канал", "Все услуги", len(rows), len(_anomaly_rows(rows)), mean(durations) if durations else "—", min(durations) if durations else "—", max(durations) if durations else "—", sum((row.sale_price for row in rows), Decimal(0))],
+            [STYLE["total_text"], STYLE["total_text"], STYLE["total_number"], STYLE["total_number"], STYLE["total_days"], STYLE["total_days"], STYLE["total_days"], STYLE["total_money"]],
         )
-    sheet.widths = {0: 28, 1: 22, 2: 16, 3: 18, 4: 18, 5: 18, 6: 23}
+    sheet.widths = {0: 28, 1: 22, 2: 16, 3: 22, 4: 18, 5: 18, 6: 18, 7: 23}
     sheet.freeze_rows = 4
-    sheet.auto_filter = f"A4:G{len(sheet.rows)}"
+    sheet.auto_filter = f"A4:H{len(sheet.rows)}"
 
 
 def _build_task_sheet(workbook: Workbook, data: SksReportData, period: str) -> None:
@@ -573,7 +629,7 @@ def _build_task_sheet(workbook: Workbook, data: SksReportData, period: str) -> N
 
     sheet.append([None] * 7)
     note = sheet.append(
-        ["Рабочее время рассчитано по будням 09:00–17:30 (Москва); ночи и выходные исключены. Выполненные задачи «Договор», «Счет», «Договор и счет» и «Счет и договор» объединены в одну категорию «Договор и счет»; регистр, ё/е и лишние пробелы не влияют." ] + [None] * 6,
+        ["Рабочее время рассчитано по будням 09:00–17:30 (Москва); ночи и выходные исключены. Учитываются выполненные задачи, название которых содержит «Договор» или «Счет», но не содержит «ЭДО»; регистр, ё/е и лишние пробелы не влияют." ] + [None] * 6,
         STYLE["note"],
     )
     sheet.merges.append(f"A{note}:G{note}")
@@ -584,17 +640,42 @@ def _build_task_sheet(workbook: Workbook, data: SksReportData, period: str) -> N
 
 def _build_detail_sheet(workbook: Workbook, title: str, rows: Sequence[ProjectMetric], period: str) -> None:
     sheet = workbook.add_sheet(title)
-    _title(sheet, title, period, 8)
-    sheet.append([None] * 8)
+    _title(sheet, title, period, 9)
+    sheet.append([None] * 9)
     sheet.append(
-        ["Проект ID", "Договор", "Услуга", "Специалист СКС", "Начало этапа", "Целевой этап", "Дней", "Стоимость, руб."],
+        ["Проект ID", "Договор", "Услуга", "Специалист СКС", "Начало этапа", "Целевой этап", "Дней", "Статус длительности", "Стоимость, руб."],
         STYLE["table_header"],
     )
     for row in rows:
         sheet.append(
-            [row.project_id, row.contract_number or "—", _service_label(row.service), row.specialist, row.start_at, row.target_at, row.duration_days, row.sale_price],
-            [STYLE["table_text"], STYLE["table_text"], STYLE["table_text"], STYLE["table_text"], STYLE["table_center"], STYLE["table_center"], STYLE["table_days"], STYLE["table_money"]],
+            [row.project_id, row.contract_number or "—", _service_label(row.service), row.specialist, row.start_at, row.target_at, row.duration_days, "Аномалия > 200 дней" if row.duration_days > ANOMALY_DURATION_DAYS else "Учитывается", row.sale_price],
+            [STYLE["table_text"], STYLE["table_text"], STYLE["table_text"], STYLE["table_text"], STYLE["table_center"], STYLE["table_center"], STYLE["table_days"], STYLE["table_text"], STYLE["table_money"]],
         )
-    sheet.widths = {0: 38, 1: 22, 2: 18, 3: 28, 4: 21, 5: 21, 6: 14, 7: 21}
+    sheet.widths = {0: 38, 1: 22, 2: 18, 3: 28, 4: 21, 5: 21, 6: 14, 7: 24, 8: 21}
     sheet.freeze_rows = 4
-    sheet.auto_filter = f"A4:H{max(4, len(sheet.rows))}"
+    sheet.auto_filter = f"A4:I{max(4, len(sheet.rows))}"
+
+
+def _build_anomaly_sheet(workbook: Workbook, data: SksReportData, period: str) -> None:
+    sheet = workbook.add_sheet("Аномалии")
+    _title(sheet, "Аномалии длительности", period, 10)
+    sheet.append([None] * 10)
+    sheet.append(
+        ["Показатель", "Проект ID", "Договор", "Услуга", "Специалист СКС", "Начало этапа", "Целевой этап", "Дней", "Стоимость, руб.", "Учёт"],
+        STYLE["table_header"],
+    )
+    rows = [
+        *(("Согласование", row) for row in _anomaly_rows(data.agreements)),
+        *(("Отправка", row) for row in _anomaly_rows(data.sends)),
+    ]
+    for metric, row in sorted(rows, key=lambda item: (item[0], -item[1].duration_days, item[1].project_id)):
+        sheet.append(
+            [metric, row.project_id, row.contract_number or "—", _service_label(row.service), row.specialist, row.start_at, row.target_at, row.duration_days, row.sale_price, "Исключён только из статистики времени"],
+            [STYLE["table_text"], STYLE["table_text"], STYLE["table_text"], STYLE["table_text"], STYLE["table_text"], STYLE["table_center"], STYLE["table_center"], STYLE["table_days"], STYLE["table_money"], STYLE["table_text"]],
+        )
+    if not rows:
+        sheet.append(["Аномалий за выбранный период нет"] + [None] * 9, STYLE["note"])
+        sheet.merges.append("A5:J5")
+    sheet.widths = {0: 18, 1: 38, 2: 22, 3: 18, 4: 28, 5: 21, 6: 21, 7: 14, 8: 21, 9: 38}
+    sheet.freeze_rows = 4
+    sheet.auto_filter = f"A4:J{max(4, len(sheet.rows))}"
