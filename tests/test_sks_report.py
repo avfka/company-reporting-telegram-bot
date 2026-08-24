@@ -48,6 +48,8 @@ def test_sks_stage_queries_keep_close_project_and_accept_stage_label_variants() 
     assert "h.new_step LIKE 'Актуализировать РМ%'" in AGREEMENT_SQL
     assert "h.new_step LIKE 'Выгрузить протоколы%ФСА'" in SENDING_SQL
     assert "h.new_step = 'Закрыть проект'" in SENDING_SQL
+    assert "h.owner_id AS specialist_id" in SENDING_SQL
+    assert "'Балакирева Диана', 'Кулешева Владислава'" in SENDING_SQL
 
 
 def test_build_sks_workbook_creates_valid_xlsx_package() -> None:
@@ -91,7 +93,7 @@ def test_build_sks_workbook_creates_valid_xlsx_package() -> None:
     assert "Сводка" in workbook_xml
     assert "Отчёт СКС" in summary_xml
     assert "Иванова Елена" in summary_xml
-    assert "Среднее время отправки · все СКС" in summary_xml
+    assert "Среднее время отправки · Балакирева и Кулешева" in summary_xml
     assert "Согласовано отчетов · СКС (8 специалистов)" in summary_xml
     assert "Среднее время задачи · &lt; 14 часов" in summary_xml
     assert "Договор и счет" in workbook_content
