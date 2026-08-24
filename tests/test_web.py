@@ -99,7 +99,10 @@ def test_crm_schema_returns_repository_payload(monkeypatch) -> None:
 def test_crm_contacts_returns_repository_payload(monkeypatch) -> None:
     monkeypatch.setattr(
         "reporting_bot.web.CrmBridgeRepository.find_contacts",
-        lambda self, phone: {"contacts": [{"id": "client-1", "phone": phone}]},
+        lambda self, phone, staff_telegram_id=None: {
+            "contacts": [{"id": "client-1", "phone": phone}],
+            "staff_telegram_id": staff_telegram_id,
+        },
     )
     response = asyncio.run(
         request(
@@ -111,6 +114,57 @@ def test_crm_contacts_returns_repository_payload(monkeypatch) -> None:
     )
     assert response.status_code == 200
     assert response.json()["contacts"][0]["phone"] == "+79991234567"
+
+
+def test_crm_contacts_scopes_projects_to_staff(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "reporting_bot.web.CrmBridgeRepository.find_contacts",
+        lambda self, phone, staff_telegram_id=None: {
+            "contacts": [],
+            "staff_telegram_id": staff_telegram_id,
+        },
+    )
+    response = asyncio.run(
+        request(
+            create_app(configured_settings()),
+            "GET",
+            "/internal/crm/contacts?phone=%2B79991234567&staff_telegram_id=547997434",
+            headers={"X-CRM-Bridge-Token": "bridge-secret"},
+        )
+    )
+    assert response.status_code == 200
+    assert response.json()["staff_telegram_id"] == 547997434
+
+
+def test_crm_staff_returns_repository_payload(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "reporting_bot.web.CrmBridgeRepository.find_staff",
+        lambda self, telegram_id: {
+            "staff": {"id": "user-1", "telegram_id": telegram_id}
+        },
+    )
+    response = asyncio.run(
+        request(
+            create_app(configured_settings()),
+            "GET",
+            "/internal/crm/staff?telegram_id=547997434",
+            headers={"X-CRM-Bridge-Token": "bridge-secret"},
+        )
+    )
+    assert response.status_code == 200
+    assert response.json()["staff"]["id"] == "user-1"
+
+
+def test_crm_staff_rejects_missing_telegram_id() -> None:
+    response = asyncio.run(
+        request(
+            create_app(configured_settings()),
+            "GET",
+            "/internal/crm/staff",
+            headers={"X-CRM-Bridge-Token": "bridge-secret"},
+        )
+    )
+    assert response.status_code == 400
 
 
 def test_crm_contacts_rejects_missing_phone(monkeypatch) -> None:

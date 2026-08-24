@@ -11,6 +11,7 @@ def test_group_contacts_puts_open_project_first() -> None:
             "phone": "+79991234567",
             "second_phone": None,
             "project_id": "project-1",
+            "company_id": "company-1",
             "contract_number": "42/26",
             "service": "sout",
             "current_step": "Согласовать отчет у клиента",
@@ -25,5 +26,6 @@ def test_group_contacts_puts_open_project_first() -> None:
     payload = CrmBridgeRepository._group_contacts(rows)
 
     project = payload["contacts"][0]["projects"][0]
+    assert project["company_id"] == "company-1"
     assert project["current_step"] == "Согласовать отчет у клиента"
     assert project["url"].endswith("/project-1")

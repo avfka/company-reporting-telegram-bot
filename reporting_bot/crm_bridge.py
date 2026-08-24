@@ -85,7 +85,68 @@ class CrmBridgeRepository:
         finally:
             engine.dispose()
 
-    def find_contacts(self, phone: str) -> dict[str, Any]:
+    def find_staff(self, telegram_id: int) -> dict[str, Any]:
+        if telegram_id <= 0:
+            raise ValueError("Telegram ID must be a positive integer")
+
+        database_url = self.settings.database_url.replace(
+            "postgresql://", "postgresql+psycopg://", 1
+        )
+        engine = create_engine(
+            database_url,
+            poolclass=NullPool,
+            connect_args={"connect_timeout": self.settings.connect_timeout_seconds},
+        )
+        try:
+            with engine.connect() as connection:
+                with connection.begin():
+                    connection.execute(text("SET TRANSACTION READ ONLY"))
+                    connection.execute(
+                        text("SELECT set_config('statement_timeout', :timeout, true)"),
+                        {"timeout": f"{self.settings.statement_timeout_ms}ms"},
+                    )
+                    row = connection.execute(
+                        text(
+                            """
+                            SELECT id::text AS id, telegram_id, email,
+                                   first_name, last_name, is_active, role,
+                                   group_id
+                            FROM users
+                            WHERE telegram_id::text = :telegram_id
+                              AND coalesce(is_active, true) = true
+                            ORDER BY id
+                            LIMIT 1
+                            """
+                        ),
+                        {"telegram_id": str(telegram_id)},
+                    ).mappings().first()
+                    if row is None:
+                        return {"staff": None}
+                    return {
+                        "staff": {
+                            "id": str(row["id"]),
+                            "telegram_id": row["telegram_id"],
+                            "email": row["email"],
+                            "first_name": row["first_name"],
+                            "last_name": row["last_name"],
+                            "name": " ".join(
+                                part
+                                for part in (row["first_name"], row["last_name"])
+                                if part
+                            )
+                            or None,
+                            "role": row["role"],
+                            "group_id": row["group_id"],
+                        }
+                    }
+        finally:
+            engine.dispose()
+
+    def find_contacts(
+        self,
+        phone: str,
+        staff_telegram_id: int | None = None,
+    ) -> dict[str, Any]:
         phone_digits = re.sub(r"\D", "", phone)
         if len(phone_digits) < 7:
             raise ValueError("Phone must contain at least 7 digits")
@@ -109,12 +170,20 @@ class CrmBridgeRepository:
                     rows = connection.execute(
                         text(
                             """
+                            WITH selected_staff AS (
+                              SELECT id
+                              FROM users
+                              WHERE telegram_id::text = :staff_telegram_id
+                                AND coalesce(is_active, true) = true
+                              LIMIT 1
+                            )
                             SELECT
                               c.id::text AS client_id,
                               c.name AS client_name,
                               c.phone,
                               c.second_phone,
                               p.id::text AS project_id,
+                              p.company_id::text AS company_id,
                               p.contract_number,
                               p.service,
                               p.current_step,
@@ -136,13 +205,31 @@ class CrmBridgeRepository:
                                 regexp_replace(coalesce(c.phone, ''), '\\D', '', 'g') = :phone
                                 OR regexp_replace(coalesce(c.second_phone, ''), '\\D', '', 'g') = :phone
                               )
+                              AND (
+                                :staff_telegram_id = ''
+                                OR EXISTS (
+                                  SELECT 1
+                                  FROM selected_staff staff
+                                  WHERE staff.id = p.manager_id
+                                     OR staff.id = p.expert_id
+                                     OR staff.id = p.measurer_id
+                                     OR staff.id = p.manager_sks_id
+                                )
+                              )
                             ORDER BY c.id, coalesce(p.closed, false),
                                      p.current_step_updated_at DESC NULLS LAST,
                                      p.created_at DESC NULLS LAST
                             LIMIT 100
                             """
                         ),
-                        {"phone": phone_digits},
+                        {
+                            "phone": phone_digits,
+                            "staff_telegram_id": (
+                                str(staff_telegram_id)
+                                if staff_telegram_id is not None
+                                else ""
+                            ),
+                        },
                     ).mappings()
                     return self._group_contacts(rows)
         finally:
@@ -168,6 +255,7 @@ class CrmBridgeRepository:
                 contact["projects"].append(
                     {
                         "id": project_id,
+                        "company_id": row["company_id"],
                         "contract_number": row["contract_number"],
                         "service": row["service"],
                         "current_step": row["current_step"],
