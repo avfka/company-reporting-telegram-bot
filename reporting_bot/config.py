@@ -30,6 +30,7 @@ class Settings:
     telegram_webhook_secret: str
     allowed_user_ids: frozenset[int]
     database_url: str
+    crm_bridge_token: str = ""
     reports_path: str = "reports.json"
     statement_timeout_ms: int = 10_000
     connect_timeout_seconds: int = 5
@@ -45,6 +46,7 @@ class Settings:
             telegram_webhook_secret=os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip(),
             allowed_user_ids=allowed_user_ids | extra_user_ids,
             database_url=os.getenv("DATABASE_URL", "").strip(),
+            crm_bridge_token=os.getenv("CRM_BRIDGE_TOKEN", "").strip(),
             reports_path=os.getenv("REPORTS_PATH", "reports.json").strip() or "reports.json",
             statement_timeout_ms=_positive_int("DB_STATEMENT_TIMEOUT_MS", 10_000),
             connect_timeout_seconds=_positive_int("DB_CONNECT_TIMEOUT_SECONDS", 5),

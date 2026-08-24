@@ -12,6 +12,7 @@ def configured_settings() -> Settings:
         telegram_webhook_secret="secret",
         allowed_user_ids=frozenset({42}),
         database_url="postgresql+psycopg://user:pass@localhost/db",
+        crm_bridge_token="bridge-secret",
     )
 
 
@@ -64,3 +65,32 @@ def test_webhook_accepts_setup_update_before_database_is_configured() -> None:
         )
     )
     assert response.status_code == 200
+
+
+def test_crm_schema_rejects_invalid_bridge_token() -> None:
+    response = asyncio.run(
+        request(
+            create_app(configured_settings()),
+            "GET",
+            "/internal/crm/schema",
+            headers={"X-CRM-Bridge-Token": "wrong"},
+        )
+    )
+    assert response.status_code == 401
+
+
+def test_crm_schema_returns_repository_payload(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "reporting_bot.web.CrmBridgeRepository.schema",
+        lambda self: {"columns": [{"table_name": "clients"}], "foreign_keys": []},
+    )
+    response = asyncio.run(
+        request(
+            create_app(configured_settings()),
+            "GET",
+            "/internal/crm/schema",
+            headers={"X-CRM-Bridge-Token": "bridge-secret"},
+        )
+    )
+    assert response.status_code == 200
+    assert response.json()["columns"][0]["table_name"] == "clients"

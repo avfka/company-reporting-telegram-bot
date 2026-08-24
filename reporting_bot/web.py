@@ -7,6 +7,7 @@ import secrets
 from typing import Any, Mapping
 
 from reporting_bot.config import Settings
+from reporting_bot.crm_bridge import CrmBridgeRepository
 from reporting_bot.database import ReportExecutor
 from reporting_bot.dota_report import DotaReportService
 from reporting_bot.ks_reports import KsReportService
@@ -52,6 +53,9 @@ class ReportingBotApp:
         if method == "POST" and path == "/telegram/webhook":
             await self._webhook(scope, receive, send)
             return
+        if method == "GET" and path == "/internal/crm/schema":
+            await self._crm_schema(scope, send)
+            return
         await self._json(send, 404, {"detail": "Not found"})
 
     def _health(self) -> dict[str, Any]:
@@ -61,7 +65,32 @@ class ReportingBotApp:
             "database_configured": bool(self.settings.database_url),
             "access_list_configured": bool(self.settings.allowed_user_ids),
             "webhook_secret_configured": bool(self.settings.telegram_webhook_secret),
+            "crm_bridge_configured": bool(self.settings.crm_bridge_token),
         }
+
+    async def _crm_schema(self, scope, send) -> None:
+        if not self._valid_bridge_token(scope):
+            await self._json(send, 401, {"detail": "Invalid bridge token"})
+            return
+        try:
+            payload = await asyncio.to_thread(
+                CrmBridgeRepository(self.settings).schema
+            )
+        except Exception:
+            logger.exception("Failed to inspect CRM schema")
+            await self._json(send, 503, {"detail": "CRM is unavailable"})
+            return
+        await self._json(send, 200, payload)
+
+    def _valid_bridge_token(self, scope) -> bool:
+        if not self.settings.crm_bridge_token:
+            return False
+        headers = {key.lower(): value for key, value in scope.get("headers", [])}
+        supplied = headers.get(b"x-crm-bridge-token", b"").decode("utf-8")
+        return bool(supplied) and secrets.compare_digest(
+            supplied,
+            self.settings.crm_bridge_token,
+        )
 
     async def _webhook(self, scope, receive, send) -> None:
         if not self.settings.webhook_ready:
