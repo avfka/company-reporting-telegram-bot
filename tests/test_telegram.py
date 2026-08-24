@@ -3,7 +3,15 @@ import asyncio
 from reporting_bot.config import Settings
 from reporting_bot.database import QueryResult
 from reporting_bot.reports import Report, ReportCatalog
-from reporting_bot.telegram import IncomingMessage, handle_message
+from reporting_bot.telegram import (
+    IncomingCallback,
+    IncomingMessage,
+    handle_callback,
+    handle_message,
+    parse_callback,
+    parse_message,
+)
+from reporting_bot.ks_reports import FilterOption, KsFilterOptions
 
 
 def settings() -> Settings:
@@ -104,3 +112,429 @@ def test_group_chat_cannot_receive_report() -> None:
         )
     )
     assert "только в личном чате" in sent[0]
+
+
+def test_reports_sks_accepts_direct_date_range() -> None:
+    sent = []
+    generated = []
+
+    async def send(chat_id, text, reply_markup=None):
+        sent.append((chat_id, text, reply_markup))
+
+    async def run_report(report, parameters):
+        raise AssertionError("should not run")
+
+    async def send_sks(chat_id, date_from, date_to):
+        generated.append((chat_id, date_from.isoformat(), date_to.isoformat()))
+
+    asyncio.run(
+        handle_message(
+            IncomingMessage(chat_id=9, user_id=42, text="/reports_sks 2026-07-01 2026-07-31"),
+            settings(),
+            catalog(),
+            send,
+            run_report,
+            send_sks,
+        )
+    )
+    assert "Excel" in sent[0][1]
+    assert generated == [(9, "2026-07-01", "2026-07-31")]
+
+
+def test_reports_sks_shows_date_buttons() -> None:
+    sent = []
+
+    async def send(chat_id, text, reply_markup=None):
+        sent.append((text, reply_markup))
+
+    async def run_report(report, parameters):
+        raise AssertionError("should not run")
+
+    async def send_sks(chat_id, date_from, date_to):
+        raise AssertionError("should wait for a date selection")
+
+    asyncio.run(
+        handle_message(
+            IncomingMessage(chat_id=9, user_id=42, text="/reports_sks"),
+            settings(),
+            catalog(),
+            send,
+            run_report,
+            send_sks,
+        )
+    )
+    assert sent[0][1]["inline_keyboard"]
+
+
+def test_reports_dota_accepts_direct_date_range() -> None:
+    sent = []
+    generated = []
+
+    async def send(chat_id, text, reply_markup=None):
+        sent.append((chat_id, text, reply_markup))
+
+    async def run_report(report, parameters):
+        raise AssertionError("should not run")
+
+    async def send_dota(chat_id, date_from, date_to):
+        generated.append((chat_id, date_from.isoformat(), date_to.isoformat()))
+
+    asyncio.run(
+        handle_message(
+            IncomingMessage(chat_id=9, user_id=42, text="/reports_dota 2026-08-01 2026-08-31"),
+            settings(),
+            catalog(),
+            send,
+            run_report,
+            None,
+            send_dota,
+        )
+    )
+    assert "ДОТ" in sent[0][1]
+    assert generated == [(9, "2026-08-01", "2026-08-31")]
+
+
+def test_reports_dota_shows_date_buttons() -> None:
+    sent = []
+
+    async def send(chat_id, text, reply_markup=None):
+        sent.append((text, reply_markup))
+
+    async def run_report(report, parameters):
+        raise AssertionError("should not run")
+
+    async def send_dota(chat_id, date_from, date_to):
+        raise AssertionError("should wait for a date selection")
+
+    asyncio.run(
+        handle_message(
+            IncomingMessage(chat_id=9, user_id=42, text="/reports_dota"),
+            settings(),
+            catalog(),
+            send,
+            run_report,
+            None,
+            send_dota,
+        )
+    )
+    assert sent[0][1]["inline_keyboard"]
+    assert sent[0][1]["inline_keyboard"][0][0]["callback_data"].startswith("dota:")
+
+
+def test_sks_callback_runs_selected_period() -> None:
+    generated = []
+    answered = []
+
+    async def send(chat_id, text, reply_markup=None):
+        pass
+
+    async def answer(callback_query_id):
+        answered.append(callback_query_id)
+
+    async def send_sks(chat_id, date_from, date_to):
+        generated.append((chat_id, date_from.isoformat(), date_to.isoformat()))
+
+    asyncio.run(
+        handle_callback(
+            IncomingCallback("callback-1", 9, 42, "sks:to:2026-07-01:2026-07-31"),
+            settings(),
+            send,
+            answer,
+            send_sks,
+        )
+    )
+    assert answered == ["callback-1"]
+    assert generated == [(9, "2026-07-01", "2026-07-31")]
+
+
+def test_end_date_calendar_uses_wide_single_line_prompt() -> None:
+    sent = []
+
+    async def send(chat_id, text, reply_markup=None):
+        sent.append((chat_id, text, reply_markup))
+
+    async def answer(callback_query_id):
+        pass
+
+    async def send_sks(chat_id, date_from, date_to):
+        raise AssertionError("should wait for an end date")
+
+    asyncio.run(
+        handle_callback(
+            IncomingCallback("callback-wide", 9, 42, "sks:from:2026-08-07"),
+            settings(),
+            send,
+            answer,
+            send_sks,
+        )
+    )
+
+    assert len(sent) == 1
+    assert "\n" not in sent[0][1]
+    assert sent[0][1] == (
+        "Дата начала отчёта: <b>07.08.2026</b> · "
+        "Выберите дату окончания отчётного периода:"
+    )
+    assert len(sent[0][2]["inline_keyboard"][1]) == 7
+
+
+def test_end_date_calendar_keeps_wide_prompt_when_switching_month() -> None:
+    sent = []
+
+    async def send(chat_id, text, reply_markup=None):
+        sent.append((text, reply_markup))
+
+    async def answer(callback_query_id):
+        pass
+
+    async def send_sks(chat_id, date_from, date_to):
+        raise AssertionError("should wait for an end date")
+
+    asyncio.run(
+        handle_callback(
+            IncomingCallback("callback-month", 9, 42, "sks:month_to:2026-08-07:2026-09"),
+            settings(),
+            send,
+            answer,
+            send_sks,
+        )
+    )
+
+    assert sent[0][0].startswith("Дата начала отчёта: <b>07.08.2026</b>")
+    assert sent[0][1]["inline_keyboard"][0][1]["text"] == "Сентябрь 2026"
+
+
+def test_dota_callback_runs_selected_period() -> None:
+    generated = []
+    answered = []
+
+    async def send(chat_id, text, reply_markup=None):
+        pass
+
+    async def answer(callback_query_id):
+        answered.append(callback_query_id)
+
+    async def send_sks(chat_id, date_from, date_to):
+        raise AssertionError("should not run SKS")
+
+    async def send_dota(chat_id, date_from, date_to):
+        generated.append((chat_id, date_from.isoformat(), date_to.isoformat()))
+
+    asyncio.run(
+        handle_callback(
+            IncomingCallback("callback-2", 9, 42, "dota:to:2026-08-01:2026-08-31"),
+            settings(),
+            send,
+            answer,
+            send_sks,
+            send_dota,
+        )
+    )
+    assert answered == ["callback-2"]
+    assert generated == [(9, "2026-08-01", "2026-08-31")]
+
+
+def test_parse_callback_reads_chat_and_sender() -> None:
+    parsed = parse_callback(
+        {
+            "callback_query": {
+                "id": "cb",
+                "from": {"id": 42},
+                "message": {"chat": {"id": 9, "type": "private"}},
+                "data": "sks:noop",
+            }
+        }
+    )
+    assert parsed is not None
+    assert parsed.chat_id == 9
+    assert parsed.user_id == 42
+
+
+def test_parse_message_keeps_replied_bot_prompt() -> None:
+    parsed = parse_message(
+        {
+            "message": {
+                "from": {"id": 42},
+                "chat": {"id": 9, "type": "private"},
+                "text": "Иванова Елена",
+                "reply_to_message": {"text": "Код выбора: KSM|ksa|20260701|20260731|-|-|p"},
+            }
+        }
+    )
+    assert parsed is not None
+    assert parsed.reply_to_text == "Код выбора: KSM|ksa|20260701|20260731|-|-|p"
+
+
+def test_reports_ks_shows_combined_and_four_separate_reports() -> None:
+    sent = []
+
+    async def send(chat_id, text, reply_markup=None):
+        sent.append((text, reply_markup))
+
+    async def run_report(report, parameters):
+        raise AssertionError("should not run")
+
+    asyncio.run(
+        handle_message(
+            IncomingMessage(chat_id=9, user_id=42, text="/reports_ks"),
+            settings(),
+            catalog(),
+            send,
+            run_report,
+        )
+    )
+    buttons = sent[0][1]["inline_keyboard"]
+    assert len(buttons) == 5
+    assert buttons[0][0]["callback_data"] == "ks:open:ksa"
+
+
+def test_direct_ks_report_dates_continue_to_filters() -> None:
+    sent = []
+    generated = []
+
+    async def send(chat_id, text, reply_markup=None):
+        sent.append((text, reply_markup))
+
+    async def run_report(report, parameters):
+        raise AssertionError("should not run")
+
+    async def send_ks(*args):
+        generated.append(args)
+
+    async def load_filters(department_token):
+        return KsFilterOptions(
+            departments=(FilterOption("abc123", "КС"),),
+            managers=(),
+            products=(),
+        )
+
+    asyncio.run(
+        handle_message(
+            IncomingMessage(chat_id=9, user_id=42, text="/reports_ks_plan 2026-07-01 2026-07-31"),
+            settings(),
+            catalog(),
+            send,
+            run_report,
+            send_ks_report=send_ks,
+            load_ks_filters=load_filters,
+        )
+    )
+    assert not generated
+    assert "Выберите отдел" in sent[0][0]
+    assert sent[0][1]["inline_keyboard"][0][0]["callback_data"].startswith("ksp:dept:")
+
+
+def test_ks_filter_callback_generates_selected_report() -> None:
+    generated = []
+
+    async def send(chat_id, text, reply_markup=None):
+        pass
+
+    async def answer(callback_query_id):
+        pass
+
+    async def send_sks(chat_id, date_from, date_to):
+        raise AssertionError("should not run SKS")
+
+    async def send_ks(*args):
+        generated.append(args)
+
+    async def load_filters(department_token):
+        return KsFilterOptions((), (), ())
+
+    asyncio.run(
+        handle_callback(
+            IncomingCallback("ks-final", 9, 42, "ksf:go:20260701:20260731:abc123:fedcba:p:def456"),
+            settings(),
+            send,
+            answer,
+            send_sks,
+            send_ks_report=send_ks,
+            load_ks_filters=load_filters,
+        )
+    )
+    assert generated[0][1] == "funnel"
+    assert generated[0][2].isoformat() == "2026-07-01"
+    assert generated[0][4].department_token == "abc123"
+    assert generated[0][5] == "previous"
+
+
+def test_ks_manual_manager_callback_requests_names() -> None:
+    sent = []
+
+    async def send(chat_id, text, reply_markup=None):
+        sent.append((text, reply_markup))
+
+    async def answer(callback_query_id):
+        pass
+
+    async def send_sks(chat_id, date_from, date_to):
+        raise AssertionError("should not run SKS")
+
+    async def send_ks(*args):
+        raise AssertionError("should wait for manager names")
+
+    async def load_filters(department_token):
+        return KsFilterOptions((), (), ())
+
+    asyncio.run(
+        handle_callback(
+            IncomingCallback("ks-manual", 9, 42, "ksa:mm:20260701:20260731:abc123:fedcba:p"),
+            settings(),
+            send,
+            answer,
+            send_sks,
+            send_ks_report=send_ks,
+            load_ks_filters=load_filters,
+        )
+    )
+    assert "через запятую" in sent[0][0]
+    assert "KSM|ksa|20260701|20260731|abc123|fedcba|p" in sent[0][0]
+    assert sent[0][1]["force_reply"] is True
+
+
+def test_ks_manual_manager_reply_generates_report_for_multiple_managers() -> None:
+    sent = []
+    generated = []
+
+    async def send(chat_id, text, reply_markup=None):
+        sent.append((text, reply_markup))
+
+    async def run_report(report, parameters):
+        raise AssertionError("should not run")
+
+    async def send_ks(*args):
+        generated.append(args)
+
+    async def load_filters(department_token):
+        return KsFilterOptions(
+            (),
+            (
+                FilterOption("aaa111", "Иванова Елена"),
+                FilterOption("bbb222", "Максимович Анастасия"),
+            ),
+            (),
+        )
+
+    asyncio.run(
+        handle_message(
+            IncomingMessage(
+                chat_id=9,
+                user_id=42,
+                text="Иванова Елена, Максимович Анастасия",
+                reply_to_text=(
+                    "Введите ФИО менеджеров.\n"
+                    "Код выбора: KSM|ksa|20260701|20260731|abc123|fedcba|p"
+                ),
+            ),
+            settings(),
+            catalog(),
+            send,
+            run_report,
+            send_ks_report=send_ks,
+            load_ks_filters=load_filters,
+        )
+    )
+    assert generated[0][1] == "all"
+    assert generated[0][4].manager_token == "aaa111,bbb222"
+    assert generated[0][5] == "previous"

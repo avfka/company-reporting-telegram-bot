@@ -1,5 +1,6 @@
 click==8.4.2
 httpx==0.28.1
+Pillow==12.3.0
 psycopg[binary]==3.2.13
 SQLAlchemy==2.0.52
 uvicorn==0.39.0

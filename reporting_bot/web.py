@@ -8,8 +8,17 @@ from typing import Any, Mapping
 
 from reporting_bot.config import Settings
 from reporting_bot.database import ReportExecutor
+from reporting_bot.dota_report import DotaReportService
+from reporting_bot.ks_reports import KsReportService
 from reporting_bot.reports import ReportCatalog
-from reporting_bot.telegram import TelegramClient, handle_message, parse_message
+from reporting_bot.sks_report import SksReportService
+from reporting_bot.telegram import (
+    TelegramClient,
+    handle_callback,
+    handle_message,
+    parse_callback,
+    parse_message,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -84,7 +93,8 @@ class ReportingBotApp:
             return
 
         message = parse_message(update)
-        if message is None:
+        callback = parse_callback(update)
+        if message is None and callback is None:
             await self._json(send, 200, {"ok": True})
             return
 
@@ -95,23 +105,122 @@ class ReportingBotApp:
             )
             telegram = TelegramClient(self.settings.telegram_bot_token)
             executor = ReportExecutor(self.settings)
+            sks_service = SksReportService(self.settings)
+            dota_service = DotaReportService(self.settings)
+            ks_service = KsReportService(self.settings)
 
             async def run_report(report, parameters):
                 return await asyncio.to_thread(executor.run, report, parameters)
 
-            await handle_message(
-                message,
-                self.settings,
-                catalog,
-                telegram.send_message,
-                run_report,
-            )
+            async def send_sks_report(chat_id, date_from, date_to):
+                artifact = await asyncio.to_thread(
+                    sks_service.create,
+                    date_from,
+                    date_to,
+                )
+                await telegram.send_photo(
+                    chat_id,
+                    artifact.chart,
+                    artifact.chart_filename,
+                    artifact.caption,
+                )
+                await telegram.send_document(
+                    chat_id,
+                    artifact.workbook,
+                    artifact.workbook_filename,
+                    artifact.caption,
+                )
+
+            async def send_dota_report(chat_id, date_from, date_to):
+                artifact = await asyncio.to_thread(
+                    dota_service.create,
+                    date_from,
+                    date_to,
+                )
+                await telegram.send_photo(
+                    chat_id,
+                    artifact.chart,
+                    artifact.chart_filename,
+                    artifact.caption,
+                )
+                for chart in artifact.detail_charts:
+                    await telegram.send_photo(
+                        chat_id,
+                        chart.content,
+                        chart.filename,
+                        chart.caption,
+                    )
+                await telegram.send_document(
+                    chat_id,
+                    artifact.workbook,
+                    artifact.workbook_filename,
+                    artifact.caption,
+                )
+
+            async def load_ks_filters(department_token):
+                return await asyncio.to_thread(
+                    ks_service.filter_options,
+                    department_token,
+                )
+
+            async def send_ks_report(
+                chat_id,
+                report_kind,
+                date_from,
+                date_to,
+                filters,
+                comparison_mode,
+            ):
+                artifact = await asyncio.to_thread(
+                    ks_service.create,
+                    report_kind,
+                    date_from,
+                    date_to,
+                    filters,
+                    comparison_mode,
+                )
+                await telegram.send_photo(
+                    chat_id,
+                    artifact.chart,
+                    artifact.chart_filename,
+                    artifact.caption,
+                )
+                await telegram.send_document(
+                    chat_id,
+                    artifact.workbook,
+                    artifact.workbook_filename,
+                    artifact.caption,
+                )
+
+            if callback is not None:
+                await handle_callback(
+                    callback,
+                    self.settings,
+                    telegram.send_message,
+                    telegram.answer_callback_query,
+                    send_sks_report,
+                    send_dota_report,
+                    send_ks_report,
+                    load_ks_filters,
+                )
+            elif message is not None:
+                await handle_message(
+                    message,
+                    self.settings,
+                    catalog,
+                    telegram.send_message,
+                    run_report,
+                    send_sks_report,
+                    send_dota_report,
+                    send_ks_report,
+                    load_ks_filters,
+                )
         except Exception:
             logger.exception("Failed to process Telegram update")
             try:
                 telegram = TelegramClient(self.settings.telegram_bot_token)
                 await telegram.send_message(
-                    message.chat_id,
+                    callback.chat_id if callback is not None else message.chat_id,
                     "Не удалось сформировать отчёт. Обратитесь к администратору.",
                 )
             except Exception:

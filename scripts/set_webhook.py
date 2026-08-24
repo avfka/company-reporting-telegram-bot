@@ -27,7 +27,7 @@ def main() -> None:
         json={
             "url": f"{app_url}/telegram/webhook",
             "secret_token": secret,
-            "allowed_updates": ["message"],
+            "allowed_updates": ["message", "callback_query"],
             "drop_pending_updates": False,
         },
         timeout=15,
