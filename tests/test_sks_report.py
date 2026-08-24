@@ -9,6 +9,7 @@ from reporting_bot.sks_report import (
     AGREEMENT_SQL,
     ANOMALY_DURATION_DAYS,
     ProjectMetric,
+    SCS_SPECIALISTS,
     SENDING_SQL,
     SksReportData,
     TASK_DURATION_SQL,
@@ -91,10 +92,23 @@ def test_build_sks_workbook_creates_valid_xlsx_package() -> None:
     assert "Отчёт СКС" in summary_xml
     assert "Иванова Елена" in summary_xml
     assert "Среднее время отправки · все СКС" in summary_xml
-    assert "Согласовано отчетов · все СКС" in summary_xml
+    assert "Согласовано отчетов · СКС (8 специалистов)" in summary_xml
     assert "Среднее время задачи · &lt; 14 часов" in summary_xml
     assert "Договор и счет" in workbook_content
     assert "Аномалии" in workbook_xml
+
+
+def test_sks_approval_scope_contains_only_requested_specialists() -> None:
+    assert SCS_SPECIALISTS == (
+        "Иванова Елена",
+        "Шергина Надежда",
+        "Григорьева Алёна",
+        "Хасанова Азалия",
+        "Сластина Ангелина",
+        "Орлова Полина",
+        "Максимович Анастасия",
+        "Кирпиченко Полина",
+    )
 
 
 def test_build_sks_chart_creates_readable_png() -> None:
