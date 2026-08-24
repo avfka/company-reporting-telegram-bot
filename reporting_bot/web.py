@@ -5,6 +5,7 @@ import json
 import logging
 import secrets
 from typing import Any, Mapping
+from urllib.parse import parse_qs
 
 from reporting_bot.config import Settings
 from reporting_bot.crm_bridge import CrmBridgeRepository
@@ -56,6 +57,9 @@ class ReportingBotApp:
         if method == "GET" and path == "/internal/crm/schema":
             await self._crm_schema(scope, send)
             return
+        if method == "GET" and path == "/internal/crm/contacts":
+            await self._crm_contacts(scope, send)
+            return
         await self._json(send, 404, {"detail": "Not found"})
 
     def _health(self) -> dict[str, Any]:
@@ -78,6 +82,26 @@ class ReportingBotApp:
             )
         except Exception:
             logger.exception("Failed to inspect CRM schema")
+            await self._json(send, 503, {"detail": "CRM is unavailable"})
+            return
+        await self._json(send, 200, payload)
+
+    async def _crm_contacts(self, scope, send) -> None:
+        if not self._valid_bridge_token(scope):
+            await self._json(send, 401, {"detail": "Invalid bridge token"})
+            return
+        query = parse_qs(scope.get("query_string", b"").decode("utf-8"))
+        phone = str(query.get("phone", [""])[0]).strip()
+        try:
+            payload = await asyncio.to_thread(
+                CrmBridgeRepository(self.settings).find_contacts,
+                phone,
+            )
+        except ValueError as exc:
+            await self._json(send, 400, {"detail": str(exc)})
+            return
+        except Exception:
+            logger.exception("Failed to find CRM contact")
             await self._json(send, 503, {"detail": "CRM is unavailable"})
             return
         await self._json(send, 200, payload)

@@ -94,3 +94,32 @@ def test_crm_schema_returns_repository_payload(monkeypatch) -> None:
     )
     assert response.status_code == 200
     assert response.json()["columns"][0]["table_name"] == "clients"
+
+
+def test_crm_contacts_returns_repository_payload(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "reporting_bot.web.CrmBridgeRepository.find_contacts",
+        lambda self, phone: {"contacts": [{"id": "client-1", "phone": phone}]},
+    )
+    response = asyncio.run(
+        request(
+            create_app(configured_settings()),
+            "GET",
+            "/internal/crm/contacts?phone=%2B79991234567",
+            headers={"X-CRM-Bridge-Token": "bridge-secret"},
+        )
+    )
+    assert response.status_code == 200
+    assert response.json()["contacts"][0]["phone"] == "+79991234567"
+
+
+def test_crm_contacts_rejects_missing_phone(monkeypatch) -> None:
+    response = asyncio.run(
+        request(
+            create_app(configured_settings()),
+            "GET",
+            "/internal/crm/contacts",
+            headers={"X-CRM-Bridge-Token": "bridge-secret"},
+        )
+    )
+    assert response.status_code == 400
