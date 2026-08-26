@@ -10,11 +10,13 @@ from reporting_bot.sks_report import (
     ANOMALY_DURATION_DAYS,
     ProjectMetric,
     SCS_SPECIALISTS,
+    SENDING_ASSIGNED_TASK_SQL,
     SENDING_SQL,
     SksReportData,
     TASK_DURATION_SQL,
     TaskMetric,
     _summary_values,
+    _service_category_average,
     build_sks_chart,
     build_sks_workbook,
     working_seconds,
@@ -48,8 +50,10 @@ def test_sks_stage_queries_keep_close_project_and_accept_stage_label_variants() 
     assert "h.new_step LIKE 'Актуализировать РМ%'" in AGREEMENT_SQL
     assert "h.new_step LIKE 'Выгрузить протоколы%ФСА'" in SENDING_SQL
     assert "h.new_step = 'Закрыть проект'" in SENDING_SQL
-    assert "h.owner_id AS specialist_id" in SENDING_SQL
-    assert "'Балакирева Диана', 'Кулешева Владислава'" in SENDING_SQL
+    assert "p.manager_sks_id AS specialist_id" in SENDING_SQL
+    assert "Балакирева Диана" not in SENDING_SQL
+    assert "Кулешева Владислава" not in SENDING_SQL
+    assert "count(DISTINCT id)" in SENDING_ASSIGNED_TASK_SQL
 
 
 def test_build_sks_workbook_creates_valid_xlsx_package() -> None:
@@ -93,8 +97,9 @@ def test_build_sks_workbook_creates_valid_xlsx_package() -> None:
     assert "Сводка" in workbook_xml
     assert "Отчёт СКС" in summary_xml
     assert "Иванова Елена" in summary_xml
-    assert "Среднее время отправки · Балакирева и Кулешева" in summary_xml
-    assert "Согласовано отчетов · СКС (8 специалистов)" in summary_xml
+    assert "Среднее время отправки · все СКС" in summary_xml
+    assert "Согласовано отчетов · все СКС" in summary_xml
+    assert "Согласовано отчетов · основные 6" in summary_xml
     assert "Среднее время задачи · &lt; 14 часов" in summary_xml
     assert "Договор и счет" in workbook_content
     assert "Аномалии" in workbook_xml
@@ -111,6 +116,27 @@ def test_sks_approval_scope_contains_only_requested_specialists() -> None:
         "Максимович Анастасия",
         "Кирпиченко Полина",
     )
+
+
+def test_sending_average_matches_stakeholder_formula_by_service_category() -> None:
+    def metric(project_id: str, service: str, duration_days: float) -> ProjectMetric:
+        return ProjectMetric(
+            project_id=project_id,
+            contract_number=project_id,
+            service=service,
+            specialist="Иванова Елена",
+            start_at=datetime(2026, 7, 1, 9, 0),
+            target_at=datetime(2026, 7, 2, 9, 0),
+            duration_days=duration_days,
+            sale_price=Decimal("0"),
+        )
+
+    rows = (
+        metric("sout-1", "sout", 2),
+        metric("sout-2", "sout", 4),
+        metric("other-1", "pk", 8),
+    )
+    assert _service_category_average(rows) == 5.5
 
 
 def test_build_sks_chart_creates_readable_png() -> None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import io
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from functools import lru_cache
@@ -28,6 +28,14 @@ SCS_SPECIALISTS = (
     "Орлова Полина",
     "Максимович Анастасия",
     "Кирпиченко Полина",
+)
+PRIMARY_SPECIALISTS = (
+    "Иванова Елена",
+    "Максимович Анастасия",
+    "Хасанова Азалия",
+    "Орлова Полина",
+    "Сластина Ангелина",
+    "Григорьева Алёна",
 )
 SENDING_TASK_SPECIALISTS = ("Балакирева Диана", "Кулешева Владислава")
 
@@ -110,7 +118,7 @@ WITH target_candidates AS (
     h.project_id,
     h.created_at AS target_at,
     p.service,
-    h.owner_id AS specialist_id,
+    p.manager_sks_id AS specialist_id,
     p.contract_number,
     p.sale_price,
     row_number() OVER (PARTITION BY h.project_id ORDER BY h.created_at, h.id) AS target_rank
@@ -147,10 +155,9 @@ SELECT
   extract(epoch FROM (paired.target_at - paired.start_at)) / 86400.0 AS duration_days,
   coalesce(paired.sale_price, 0) AS sale_price
 FROM paired
-JOIN users u ON u.id = paired.specialist_id
+LEFT JOIN users u ON u.id = paired.specialist_id
 WHERE paired.start_at IS NOT NULL
   AND paired.target_at >= paired.start_at
-  AND concat_ws(' ', u.last_name, u.first_name) IN ('Балакирева Диана', 'Кулешева Владислава')
 ORDER BY paired.target_at, paired.project_id
 """
 
@@ -203,6 +210,29 @@ ORDER BY u.last_name, u.first_name
 """
 
 
+SENDING_ASSIGNED_TASK_SQL = """
+WITH selected_tasks AS (
+  SELECT DISTINCT
+    t.id,
+    concat_ws(' ', u.last_name, u.first_name) AS specialist
+  FROM tasks_clone t
+  JOIN task_user tu ON tu.task_id = t.id
+  JOIN users u ON u.id = tu.user_id
+  WHERE t.done
+    AND t.closed_at >= CAST(:date_from AS DATE)
+    AND t.closed_at < CAST(:date_to_exclusive AS DATE)
+    AND concat_ws(' ', u.last_name, u.first_name) IN ('Балакирева Диана', 'Кулешева Владислава')
+)
+SELECT specialist, count(DISTINCT id) AS task_count
+FROM selected_tasks
+GROUP BY specialist
+UNION ALL
+SELECT '__total__' AS specialist, count(DISTINCT id) AS task_count
+FROM selected_tasks
+ORDER BY specialist
+"""
+
+
 @dataclass(frozen=True)
 class ProjectMetric:
     project_id: str
@@ -231,6 +261,8 @@ class SksReportData:
     sends: tuple[ProjectMetric, ...]
     tasks: tuple[TaskMetric, ...]
     sending_tasks: dict[str, int]
+    assigned_sending_tasks: dict[str, int] = field(default_factory=dict)
+    assigned_sending_task_total: int = 0
 
 
 @dataclass(frozen=True)
@@ -320,6 +352,14 @@ class SksReportService:
                     sending_tasks = {name: 0 for name in SENDING_TASK_SPECIALISTS}
                     for row in connection.execute(text(SENDING_TASK_SQL), params).mappings():
                         sending_tasks[str(row["specialist"])] = int(row["task_count"])
+                    assigned_sending_tasks = {name: 0 for name in SENDING_TASK_SPECIALISTS}
+                    assigned_sending_task_total = 0
+                    for row in connection.execute(text(SENDING_ASSIGNED_TASK_SQL), params).mappings():
+                        specialist = str(row["specialist"])
+                        if specialist == "__total__":
+                            assigned_sending_task_total = int(row["task_count"])
+                        else:
+                            assigned_sending_tasks[specialist] = int(row["task_count"])
             return SksReportData(
                 date_from=date_from,
                 date_to=date_to,
@@ -327,6 +367,8 @@ class SksReportService:
                 sends=sends,
                 tasks=tasks,
                 sending_tasks=sending_tasks,
+                assigned_sending_tasks=assigned_sending_tasks,
+                assigned_sending_task_total=assigned_sending_task_total,
             )
         finally:
             engine.dispose()
@@ -354,6 +396,20 @@ def _service_label(value: str | None) -> str:
 def _average(values: Iterable[float]) -> float | None:
     materialized = list(values)
     return mean(materialized) if materialized else None
+
+
+def _service_category_average(rows: Iterable[ProjectMetric]) -> float | None:
+    """Match the stakeholder sheet: mean of the СОУТ and other-service means."""
+    valid_rows = _duration_rows(rows)
+    category_averages = [
+        value
+        for value in (
+            _average(row.duration_days for row in valid_rows if row.service == "sout"),
+            _average(row.duration_days for row in valid_rows if row.service != "sout"),
+        )
+        if value is not None
+    ]
+    return _average(category_averages)
 
 
 def _duration_rows(rows: Iterable[ProjectMetric]) -> list[ProjectMetric]:
@@ -485,10 +541,7 @@ def _draw_sks_duration_panel(
     rows: list[tuple[str, float | None, float | None]] = []
     for name in SCS_SPECIALISTS:
         values = _summary_values(data, (name,))
-        rows.append((name, values["agreement_days"], None))
-    for name in SENDING_TASK_SPECIALISTS:
-        values = _summary_values(data, (name,))
-        rows.append((name, None, values["send_days"]))
+        rows.append((name, values["agreement_days"], values["send_days"]))
     maximum = max(
         [PLAN_SEND_DAYS, 1.0]
         + [float(value) for _, agreement, sending in rows for value in (agreement, sending) if value is not None]
@@ -564,21 +617,20 @@ def build_sks_chart(data: SksReportData) -> bytes:
     draw.text((85, 70), "СКС · Итоги работы", font=_sks_font(41, True), fill="#173A5E")
     draw.text((85, 126), f"{data.date_from:%d.%m.%Y}–{data.date_to:%d.%m.%Y} · данные CRM", font=_sks_font(21), fill="#5B6B7C")
 
-    sks = _summary_values(data, SCS_SPECIALISTS)
-    sks_agreements = _subset(data.agreements, SCS_SPECIALISTS)
+    primary = _summary_values(data, PRIMARY_SPECIALISTS)
     task_average = _average(task.working_seconds for task in data.tasks)
-    all_send_average = _average(row.duration_days for row in _duration_rows(data.sends))
+    all_send_average = _service_category_average(data.sends)
     send_detail, send_color = _sks_plan_detail(all_send_average, PLAN_SEND_DAYS, lower_is_better=True)
     task_detail, task_color = _sks_plan_detail(task_average, PLAN_TASK_SECONDS, lower_is_better=True)
-    count_detail, count_color = _sks_plan_detail(sks["approved_count"], PLAN_APPROVED_COUNT, lower_is_better=False)
-    amount_detail, amount_color = _sks_plan_detail(sks["approved_amount"], PLAN_APPROVED_AMOUNT, lower_is_better=False)
+    count_detail, count_color = _sks_plan_detail(len(data.agreements), PLAN_APPROVED_COUNT, lower_is_better=False)
+    amount_detail, amount_color = _sks_plan_detail(primary["approved_amount"], PLAN_APPROVED_AMOUNT, lower_is_better=False)
     cards = (
-        ("Согласование · СКС", _sks_days(sks["agreement_days"]), "8 специалистов", blue, "#7A8998"),
-        ("Отправка · Б/К", _sks_days(all_send_average), send_detail, orange, send_color),
-        ("Проекты отправки", f"{len(data.sends)} шт.", "Балакирева + Кулешева", purple, "#7A8998"),
+        ("Согласование · 6 спец.", _sks_days(primary["agreement_days"]), "среднее за период", blue, "#7A8998"),
+        ("Отправка · все СКС", _sks_days(all_send_average), send_detail, orange, send_color),
+        ("Задачи отправки · Б/К", f"{data.assigned_sending_task_total} шт.", "без двойного счёта", purple, "#7A8998"),
         ("Задачи · договор/счет", _sks_time(task_average), task_detail, green, task_color),
-        ("Согласовано · СКС", f"{sks['approved_count']} шт.", count_detail, blue, count_color),
-        ("Сумма · СКС", _sks_money(sks["approved_amount"]), amount_detail, orange, amount_color),
+        ("Согласовано · все СКС", f"{len(data.agreements)} шт.", count_detail, blue, count_color),
+        ("Сумма · 6 спец.", _sks_money(primary["approved_amount"]), amount_detail, orange, amount_color),
     )
     for index, card in enumerate(cards):
         column = index % 3
@@ -590,15 +642,15 @@ def build_sks_chart(data: SksReportData) -> bytes:
     _draw_sks_duration_panel(draw, (85, 455, 1105, 1025), data)
     _draw_sks_approval_panel(draw, (85, 1050, 1105, 1555), data)
 
-    sout_rows = [row for row in sks_agreements if row.service == "sout"]
-    other_rows = [row for row in sks_agreements if row.service != "sout"]
-    anomaly_agreement = len(_anomaly_rows(sks_agreements))
+    sout_rows = [row for row in data.agreements if row.service == "sout"]
+    other_rows = [row for row in data.agreements if row.service != "sout"]
+    anomaly_agreement = len(_anomaly_rows(data.agreements))
     anomaly_send = len(_anomaly_rows(data.sends))
     sending_diana = data.sending_tasks.get("Балакирева Диана", 0)
     sending_vladislava = data.sending_tasks.get("Кулешева Владислава", 0)
     operational_cards = (
-        ("СОУТ · СКС", f"{len(sout_rows)} шт.", "8 специалистов", blue),
-        ("Другие · СКС", f"{len(other_rows)} шт.", "8 специалистов", green),
+        ("СОУТ · все СКС", f"{len(sout_rows)} шт.", "согласовано за период", blue),
+        ("Другие · все СКС", f"{len(other_rows)} шт.", "согласовано за период", green),
         ("Задачи «отправка»", f"{sending_diana + sending_vladislava} шт.", f"Балакирева {sending_diana} · Кулешева {sending_vladislava}", orange),
         ("Аномалии > 200 дней", f"{anomaly_agreement + anomaly_send} записей", f"согласование {anomaly_agreement} · отправка {anomaly_send}", purple),
     )
@@ -610,7 +662,7 @@ def build_sks_chart(data: SksReportData) -> bytes:
     draw.rounded_rectangle((85, 1790, 1105, 1920), radius=18, fill="#F1F5F9")
     draw.text((108, 1810), "Как читать показатели", font=_sks_font(17, True), fill="#213547")
     draw.text((108, 1841), "• Положительный процент означает результат лучше плана. План применяется к выбранному периоду без пересчёта.", font=_sks_font(14), fill="#5B6B7C")
-    draw.text((108, 1868), "• Проекты свыше 200 дней исключены только из средних сроков; в количестве и сумме они сохранены.", font=_sks_font(14), fill="#5B6B7C")
+    draw.text((108, 1868), "• Среднее отправки = среднее между показателями СОУТ и остальных услуг, как в Google-таблице.", font=_sks_font(14), fill="#5B6B7C")
     draw.text((108, 1895), "• Задачи с полной календарной длительностью 14 часов и более исключены из расчёта.", font=_sks_font(14), fill="#5B6B7C")
     draw.text((85, 1932), "EcoStar Reports · подробности и список проектов — в Excel", font=_sks_font(16), fill="#7A8998")
 
@@ -624,7 +676,8 @@ def build_sks_workbook(data: SksReportData) -> bytes:
     workbook = Workbook(f"Отчет СКС {period}")
     _build_summary_sheet(workbook, data, period)
     _build_metric_sheet(workbook, "Согласование", data.agreements, period, specialists=SCS_SPECIALISTS, total_label="Итого СКС (8 специалистов)")
-    _build_metric_sheet(workbook, "Отправка", data.sends, period, specialists=SENDING_TASK_SPECIALISTS, total_label="Итого: Балакирева и Кулешева")
+    sending_specialists = tuple(sorted({row.specialist for row in data.sends}))
+    _build_metric_sheet(workbook, "Отправка", data.sends, period, specialists=sending_specialists, total_label="Итого: все СКС")
     _build_task_sheet(workbook, data, period)
     _build_detail_sheet(workbook, "Проекты — согласование", _subset(data.agreements, SCS_SPECIALISTS), period)
     _build_detail_sheet(workbook, "Проекты — отправка", data.sends, period)
@@ -643,14 +696,14 @@ def _build_summary_sheet(workbook: Workbook, data: SksReportData, period: str) -
         STYLE["table_header"],
     )
 
-    sks = _summary_values(data, SCS_SPECIALISTS)
+    primary = _summary_values(data, PRIMARY_SPECIALISTS)
     task_average = _average(task.working_seconds for task in data.tasks)
-    all_send_average = _average(row.duration_days for row in _duration_rows(data.sends))
+    all_send_average = _service_category_average(data.sends)
     kpis = [
-        ("Среднее время отправки · Балакирева и Кулешева", PLAN_SEND_DAYS, all_send_average, True, "дни", "меньше — лучше", "days"),
+        ("Среднее время отправки · все СКС", PLAN_SEND_DAYS, all_send_average, True, "дни", "меньше — лучше", "days"),
         ("Среднее время задачи · < 14 часов", PLAN_TASK_SECONDS / 86400, None if task_average is None else task_average / 86400, True, "ч:м:с", "меньше — лучше", "time"),
-        ("Согласовано отчетов · СКС (8 специалистов)", PLAN_APPROVED_COUNT, sks["approved_count"], False, "шт.", "больше — лучше", "number"),
-        ("Согласовано отчетов · СКС (8 специалистов)", PLAN_APPROVED_AMOUNT, sks["approved_amount"], False, "руб.", "больше — лучше", "money"),
+        ("Согласовано отчетов · все СКС", PLAN_APPROVED_COUNT, len(data.agreements), False, "шт.", "больше — лучше", "number"),
+        ("Согласовано отчетов · основные 6", PLAN_APPROVED_AMOUNT, primary["approved_amount"], False, "руб.", "больше — лучше", "money"),
     ]
     for label, plan, actual, lower, unit, method, kind in kpis:
         value_style = {
@@ -700,27 +753,27 @@ def _build_summary_sheet(workbook: Workbook, data: SksReportData, period: str) -
         )
 
     sheet.append([None] * 8)
-    sheet.append(["Контроль согласованных отчётов · только 8 специалистов СКС, без агентского канала"] + [None] * 7, STYLE["section"])
+    sheet.append(["Контроль согласованных отчётов · количество по всем СКС, деньги и сроки по основным 6"] + [None] * 7, STYLE["section"])
     sheet.merges.append(f"A{len(sheet.rows)}:H{len(sheet.rows)}")
     sheet.append(
-        ["Категория", "СКС, шт.", "СКС, руб.", "СКС, дни", "Аномалий > 200 дней · СКС", None, None, None],
+        ["Категория", "Все СКС, шт.", "Основные 6, руб.", "Основные 6, дни", "Аномалий > 200 дней · основные 6", None, None, None],
         STYLE["table_header"],
     )
-    sks_agreements = _subset(data.agreements, SCS_SPECIALISTS)
-    for label, rows in (
-        ("СОУТ", [row for row in sks_agreements if row.service == "sout"]),
-        ("Другие услуги", [row for row in sks_agreements if row.service != "sout"]),
-        ("Итого", sks_agreements),
+    primary_agreements = _subset(data.agreements, PRIMARY_SPECIALISTS)
+    for label, all_rows, primary_rows in (
+        ("СОУТ", [row for row in data.agreements if row.service == "sout"], [row for row in primary_agreements if row.service == "sout"]),
+        ("Другие услуги", [row for row in data.agreements if row.service != "sout"], [row for row in primary_agreements if row.service != "sout"]),
+        ("Итого", list(data.agreements), primary_agreements),
     ):
-        valid_rows = _duration_rows(rows)
+        valid_rows = _duration_rows(primary_rows)
         total = label == "Итого"
         sheet.append(
             [
                 label,
-                len(rows),
-                sum((row.sale_price for row in rows), Decimal(0)),
+                len(all_rows),
+                sum((row.sale_price for row in primary_rows), Decimal(0)),
                 _average(row.duration_days for row in valid_rows) if valid_rows else "—",
-                len(_anomaly_rows(rows)),
+                len(_anomaly_rows(primary_rows)),
                 None,
                 None,
                 None,
@@ -738,19 +791,18 @@ def _build_summary_sheet(workbook: Workbook, data: SksReportData, period: str) -
         )
 
     sheet.append([None] * 8)
-    sheet.append(["Отправка · исполнители Балакирева Диана и Кулешева Владислава"] + [None] * 7, STYLE["section"])
+    sheet.append(["Отправка · задачи исполнителей Балакирева Диана и Кулешева Владислава"] + [None] * 7, STYLE["section"])
     sheet.merges.append(f"A{len(sheet.rows)}:H{len(sheet.rows)}")
     sheet.append(
-        ["Исполнитель", "Проектов, шт.", "Среднее, дни", "% к плану 4 дня", "Единица", "Контроль", None, None],
+        ["Исполнитель", "Закрыто задач, шт.", None, None, "Единица", "Контроль", None, None],
         STYLE["table_header"],
     )
     for name in (*SENDING_TASK_SPECIALISTS, "Итого"):
-        rows = list(data.sends) if name == "Итого" else _subset(data.sends, (name,))
-        send_avg = _average(row.duration_days for row in _duration_rows(rows))
         total = name == "Итого"
+        task_count = data.assigned_sending_task_total if total else data.assigned_sending_tasks.get(name, 0)
         sheet.append(
-            [name, len(rows), send_avg if send_avg is not None else "—", _variance(send_avg, PLAN_SEND_DAYS, lower_is_better=True), "проектов", f"Аномалий: {len(_anomaly_rows(rows))}", None, None],
-            [STYLE["total_text"] if total else STYLE["table_text"], STYLE["total_number"] if total else STYLE["table_number"], STYLE["total_days"] if total else STYLE["table_days"], STYLE["total_percent"] if total else STYLE["table_percent"], STYLE["total_text"] if total else STYLE["table_text"], STYLE["total_text"] if total else STYLE["table_text"], STYLE["base"], STYLE["base"]],
+            [name, task_count, None, None, "задач", "Итого без двойного счёта", None, None],
+            [STYLE["total_text"] if total else STYLE["table_text"], STYLE["total_number"] if total else STYLE["table_number"], STYLE["base"], STYLE["base"], STYLE["total_text"] if total else STYLE["table_text"], STYLE["total_text"] if total else STYLE["table_text"], STYLE["base"], STYLE["base"]],
         )
 
     sheet.append([None] * 8)
@@ -765,7 +817,7 @@ def _build_summary_sheet(workbook: Workbook, data: SksReportData, period: str) -
     sheet.append([None] * 8)
     note_row = sheet.append(
         [
-            "Отклонение: положительное значение означает выполнение лучше плана. Согласованные отчёты в штуках и рублях считаются только по 8 указанным специалистам СКС. Отправка считается только по исполнителям Балакирева Диана и Кулешева Владислава. Длительности проектов свыше 200 дней исключаются только из показателей времени. Задачи длительностью 14 часов и более исключаются полностью. План применяется к выбранному периоду без пересчёта.",
+            "Отклонение: положительное значение означает выполнение лучше плана. Как в Google-таблице: среднее время отправки — среднее из показателей СОУТ и остальных услуг по всем СКС; количество согласованных — по всем СКС; сумма — по основным 6 специалистам. В блоке отправки считаются все закрытые задачи Дианы и Владиславы, итог без двойного счёта задач, назначенных обеим. Проекты свыше 200 дней исключаются из времени. Задачи «Договор/Счет» длительностью 14 часов и более исключаются полностью.",
             None, None, None, None, None, None, None,
         ],
         STYLE["note"],
