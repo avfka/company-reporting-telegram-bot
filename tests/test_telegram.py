@@ -249,6 +249,131 @@ def test_report_agents_generates_workbook_without_dates() -> None:
     assert generated == [9]
 
 
+def test_companies_is_restricted_even_for_other_allowed_users() -> None:
+    sent = []
+
+    async def send(chat_id, text, reply_markup=None):
+        sent.append(text)
+
+    async def run_report(report, parameters):
+        raise AssertionError("should not run")
+
+    asyncio.run(
+        handle_message(
+            IncomingMessage(chat_id=9, user_id=42, text="/companies"),
+            settings(),
+            catalog(),
+            send,
+            run_report,
+        )
+    )
+    assert "запрещён" in sent[0]
+
+
+def test_companies_accepts_direct_period_for_authorized_user() -> None:
+    sent = []
+    generated = []
+
+    async def send(chat_id, text, reply_markup=None):
+        sent.append(text)
+
+    async def run_report(report, parameters):
+        raise AssertionError("should not run")
+
+    async def send_companies(chat_id, date_from, date_to):
+        generated.append((chat_id, date_from.isoformat(), date_to.isoformat()))
+
+    authorized_settings = Settings(
+        telegram_bot_token="token",
+        telegram_webhook_secret="secret",
+        allowed_user_ids=frozenset({1700849308}),
+        database_url="postgresql+psycopg://user:pass@localhost/db",
+    )
+    asyncio.run(
+        handle_message(
+            IncomingMessage(chat_id=9, user_id=1700849308, text="/companies 2026-08-01 2026-08-31"),
+            authorized_settings,
+            catalog(),
+            send,
+            run_report,
+            send_companies_report=send_companies,
+        )
+    )
+    assert "компаний" in sent[0]
+    assert generated == [(9, "2026-08-01", "2026-08-31")]
+
+
+def test_companies_callback_rechecks_restricted_access() -> None:
+    sent = []
+    answered = []
+
+    async def send(chat_id, text, reply_markup=None):
+        sent.append(text)
+
+    async def answer(callback_query_id):
+        answered.append(callback_query_id)
+
+    async def send_sks(chat_id, date_from, date_to):
+        raise AssertionError("should not run")
+
+    async def send_companies(chat_id, date_from, date_to):
+        raise AssertionError("should not run")
+
+    asyncio.run(
+        handle_callback(
+            IncomingCallback("callback-companies", 9, 42, "companies:preset:2026-08-01:2026-08-31"),
+            settings(),
+            send,
+            answer,
+            send_sks,
+            send_companies_report=send_companies,
+        )
+    )
+    assert answered == ["callback-companies"]
+    assert "запрещён" in sent[0]
+
+
+def test_companies_callback_generates_for_authorized_user() -> None:
+    sent = []
+    generated = []
+
+    async def send(chat_id, text, reply_markup=None):
+        sent.append(text)
+
+    async def answer(callback_query_id):
+        pass
+
+    async def send_sks(chat_id, date_from, date_to):
+        raise AssertionError("should not run")
+
+    async def send_companies(chat_id, date_from, date_to):
+        generated.append((chat_id, date_from.isoformat(), date_to.isoformat()))
+
+    authorized_settings = Settings(
+        telegram_bot_token="token",
+        telegram_webhook_secret="secret",
+        allowed_user_ids=frozenset({771553001}),
+        database_url="postgresql+psycopg://user:pass@localhost/db",
+    )
+    asyncio.run(
+        handle_callback(
+            IncomingCallback(
+                "callback-companies-authorized",
+                9,
+                771553001,
+                "companies:preset:2026-08-01:2026-08-31",
+            ),
+            authorized_settings,
+            send,
+            answer,
+            send_sks,
+            send_companies_report=send_companies,
+        )
+    )
+    assert "компаний" in sent[0]
+    assert generated == [(9, "2026-08-01", "2026-08-31")]
+
+
 def test_sks_callback_runs_selected_period() -> None:
     generated = []
     answered = []

@@ -41,6 +41,7 @@ STYLE = {
     "total_money": 27,
     "total_percent": 28,
     "note": 29,
+    "table_id": 30,
 }
 
 
@@ -315,6 +316,7 @@ def _styles_xml() -> str:
         (167, 1, 6, 1, "right", False),
         (165, 1, 6, 1, "right", False),
         (0, 0, 0, 0, "left", True),
+        (49, 0, 0, 1, "left", True),
     ]
     xfs = []
     for num_fmt, font, fill, border, alignment, wrap in definitions:

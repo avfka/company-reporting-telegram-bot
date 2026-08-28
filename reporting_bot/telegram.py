@@ -29,6 +29,7 @@ KS_COMMANDS = {
     "/reports_ks_projects": ("ksj", "projects", "КС — Проекты и оплаты"),
 }
 KS_PREFIXES = {prefix: (kind, title) for prefix, kind, title in KS_COMMANDS.values()}
+COMPANIES_ALLOWED_USER_IDS = frozenset({1700849308, 771553001})
 
 
 class TelegramClient:
@@ -175,6 +176,7 @@ def _help_text() -> str:
         "/reports_dota — общая и 4 детальные инфографики, Excel-отчёт ДОТ\n"
         "/reports_ks — меню аналитики КС: общий отчёт и отдельные разделы\n"
         "/report_agents — партнёры с 01.10.2025, оплаченные проекты и агентские выплаты\n"
+        "/companies — Excel-выгрузка компаний за выбранный период (ограниченный доступ)\n"
         "/run &lt;отчёт&gt; [параметр=значение] — сформировать отчёт\n"
         "/whoami — показать ваш Telegram ID\n"
         "/help — помощь"
@@ -192,6 +194,8 @@ def _report_list(catalog: ReportCatalog) -> str:
         "Общий отчёт и четыре отдельных раздела с фильтрами, Excel и графиком. Команда: /reports_ks",
         "\n<code>report_agents</code> — Отчёт по партнёрам",
         "Партнёры с 01.10.2025 без ГТО, оплаченные проекты и агентские выплаты. Команда: /report_agents",
+        "\n<code>companies</code> — Выгрузка компаний",
+        "Компании, созданные за выбранный период; доступ только уполномоченным пользователям. Команда: /companies",
     ]
     for report in catalog.all():
         suffix = ""
@@ -230,7 +234,7 @@ def _calendar_markup(
     month: date,
     start: date | None = None,
 ) -> dict[str, Any]:
-    if report_prefix not in {"sks", "dota", *KS_PREFIXES}:
+    if report_prefix not in {"sks", "dota", "companies", *KS_PREFIXES}:
         raise ValueError("Unknown report prefix")
     if mode not in {"from", "to"}:
         raise ValueError("Unknown calendar mode")
@@ -543,6 +547,7 @@ async def handle_message(
     send_ks_report: Callable[[int, str, date, date, KsFilters, str], Awaitable[None]] | None = None,
     load_ks_filters: Callable[[str], Awaitable[KsFilterOptions]] | None = None,
     send_agents_report: Callable[[int], Awaitable[None]] | None = None,
+    send_companies_report: Callable[[int, date, date], Awaitable[None]] | None = None,
 ) -> None:
     command = message.text.split(maxsplit=1)[0].split("@", 1)[0].lower()
 
@@ -593,6 +598,29 @@ async def handle_message(
         return
     if command == "/reports":
         await send_message(message.chat_id, _report_list(catalog))
+        return
+    if command in ("/companies", "companies"):
+        if message.user_id not in COMPANIES_ALLOWED_USER_IDS:
+            await send_message(message.chat_id, "Доступ к выгрузке компаний запрещён.")
+            return
+        if send_companies_report is None:
+            await send_message(message.chat_id, "Выгрузка компаний временно недоступна.")
+            return
+        try:
+            selected = _parse_report_dates(message.text, "companies")
+        except ValueError as exc:
+            await send_message(message.chat_id, str(exc))
+            return
+        if selected is None:
+            today = datetime.now(ZoneInfo("Europe/Moscow")).date()
+            await send_message(
+                message.chat_id,
+                "<b>Выгрузка компаний</b>\n\nВыберите период или отправьте команду:\n<code>/companies 2026-08-01 2026-08-31</code>",
+                _report_entry_markup("companies", today),
+            )
+            return
+        await send_message(message.chat_id, "Формирую Excel-выгрузку компаний…")
+        await send_companies_report(message.chat_id, *selected)
         return
     if command in ("/report_agents", "report_agents", "/reports_agents", "reports_agents"):
         if send_agents_report is None:
@@ -698,6 +726,7 @@ async def handle_callback(
     send_dota_report: Callable[[int, date, date], Awaitable[None]] | None = None,
     send_ks_report: Callable[[int, str, date, date, KsFilters, str], Awaitable[None]] | None = None,
     load_ks_filters: Callable[[str], Awaitable[KsFilterOptions]] | None = None,
+    send_companies_report: Callable[[int, date, date], Awaitable[None]] | None = None,
 ) -> None:
     await answer_callback(callback.callback_query_id)
     if callback.chat_type != "private":
@@ -705,6 +734,9 @@ async def handle_callback(
         return
     if callback.user_id not in settings.allowed_user_ids:
         await send_message(callback.chat_id, "Доступ запрещён. Используйте /whoami и передайте ID администратору.")
+        return
+    if callback.data.startswith("companies:") and callback.user_id not in COMPANIES_ALLOWED_USER_IDS:
+        await send_message(callback.chat_id, "Доступ к выгрузке компаний запрещён.")
         return
     if callback.data.startswith("ks:open:"):
         prefix = callback.data.split(":", 2)[2]
@@ -718,7 +750,7 @@ async def handle_callback(
             _report_entry_markup(prefix, today),
         )
         return
-    if not callback.data.startswith(("sks:", "dota:", *(prefix + ":" for prefix in KS_PREFIXES))):
+    if not callback.data.startswith(("sks:", "dota:", "companies:", *(prefix + ":" for prefix in KS_PREFIXES))):
         return
     parts = callback.data.split(":")
     report_prefix = parts[0]
@@ -730,6 +762,10 @@ async def handle_callback(
         report_title = "ДОТ"
         report_command = "/reports_dota"
         send_report = send_dota_report
+    elif report_prefix == "companies":
+        report_title = "Выгрузка компаний"
+        report_command = "/companies"
+        send_report = send_companies_report
     else:
         report_kind, report_title = KS_PREFIXES[report_prefix]
         report_command = next(command for command, values in KS_COMMANDS.items() if values[0] == report_prefix)
@@ -758,6 +794,8 @@ async def handle_callback(
             message_text = (
                 "Формирую инфографику и Excel-отчёт ДОТ…"
                 if report_prefix == "dota"
+                else "Формирую Excel-выгрузку компаний…"
+                if report_prefix == "companies"
                 else f"Формирую Excel-отчёт {report_title}…"
             )
             await send_message(callback.chat_id, message_text)
@@ -798,6 +836,8 @@ async def handle_callback(
             message_text = (
                 "Формирую инфографику и Excel-отчёт ДОТ…"
                 if report_prefix == "dota"
+                else "Формирую Excel-выгрузку компаний…"
+                if report_prefix == "companies"
                 else f"Формирую Excel-отчёт {report_title}…"
             )
             await send_message(callback.chat_id, message_text)
