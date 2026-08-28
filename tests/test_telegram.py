@@ -164,6 +164,7 @@ def test_reports_sks_shows_date_buttons() -> None:
         )
     )
     assert sent[0][1]["inline_keyboard"]
+    assert sent[0][1]["inline_keyboard"][0][0]["callback_data"].startswith("sks:")
 
 
 def test_reports_dota_accepts_direct_date_range() -> None:
@@ -219,6 +220,33 @@ def test_reports_dota_shows_date_buttons() -> None:
     )
     assert sent[0][1]["inline_keyboard"]
     assert sent[0][1]["inline_keyboard"][0][0]["callback_data"].startswith("dota:")
+
+
+def test_report_agents_generates_workbook_without_dates() -> None:
+    sent = []
+    generated = []
+
+    async def send(chat_id, text, reply_markup=None):
+        sent.append((chat_id, text, reply_markup))
+
+    async def run_report(report, parameters):
+        raise AssertionError("should not run")
+
+    async def send_agents(chat_id):
+        generated.append(chat_id)
+
+    asyncio.run(
+        handle_message(
+            IncomingMessage(chat_id=9, user_id=42, text="/report_agents"),
+            settings(),
+            catalog(),
+            send,
+            run_report,
+            send_agents_report=send_agents,
+        )
+    )
+    assert "партнёрам" in sent[0][1]
+    assert generated == [9]
 
 
 def test_sks_callback_runs_selected_period() -> None:

@@ -10,6 +10,7 @@
 - `/whoami`, `/reports`, `/run <report> [name=value]`;
 - `/reports_sks` с календарём выбора периода и отправкой инфографики и подробного `.xlsx` в Telegram;
 - `/reports_dota` с календарём, динамикой запусков/выпусков и детализацией проектов;
+- `/report_agents` со списком партнёров, оплаченных проектов и агентских выплат;
 - SQL только из версионируемого `reports.json`;
 - PostgreSQL read-only транзакция, таймаут подключения и запроса;
 - лимит строк и разбиение длинных Telegram-сообщений;
@@ -61,12 +62,17 @@ python scripts/set_webhook.py
 /reports_ks_managers
 /reports_ks_funnel
 /reports_ks_projects
+/report_agents
 /run db_status
 /run table_catalog
 /run daily_sales report_date=2026-08-18
 ```
 
 `daily_sales` — только пример из `examples/business_reports.json`; адаптируйте имена таблиц и полей и перенесите запись в `reports.json`.
+
+## Отчёт по партнёрам
+
+Команда `/report_agents` формирует Excel по всем партнёрам, созданным с 01.10.2025, кроме группы ГТО (`group_id = 2`). Проект относится к партнёру по `projects.partner_id` и считается оплаченным только при зелёном флаге `projects.is_paid = true`; оплаченная сумма берётся из `projects.paid_amount`. Агентские выплаты берутся из `partner_fee.amount` только при совпадении партнёра у выплаты и проекта и только для оплаченных проектов. В книге есть сводка, полный список партнёров, оплаченные проекты, отдельные выплаты и контроль исключений.
 
 ## Отчёт СКС
 

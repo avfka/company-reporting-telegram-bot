@@ -8,6 +8,7 @@ from typing import Any, Mapping
 from urllib.parse import parse_qs
 
 from reporting_bot.config import Settings
+from reporting_bot.agents_report import AgentsReportService
 from reporting_bot.crm_bridge import CrmBridgeRepository
 from reporting_bot.database import ReportExecutor
 from reporting_bot.dota_report import DotaReportService
@@ -161,6 +162,7 @@ class ReportingBotApp:
             sks_service = SksReportService(self.settings)
             dota_service = DotaReportService(self.settings)
             ks_service = KsReportService(self.settings)
+            agents_service = AgentsReportService(self.settings)
 
             async def run_report(report, parameters):
                 return await asyncio.to_thread(executor.run, report, parameters)
@@ -245,6 +247,15 @@ class ReportingBotApp:
                     artifact.caption,
                 )
 
+            async def send_agents_report(chat_id):
+                artifact = await asyncio.to_thread(agents_service.create)
+                await telegram.send_document(
+                    chat_id,
+                    artifact.workbook,
+                    artifact.workbook_filename,
+                    artifact.caption,
+                )
+
             if callback is not None:
                 await handle_callback(
                     callback,
@@ -267,6 +278,7 @@ class ReportingBotApp:
                     send_dota_report,
                     send_ks_report,
                     load_ks_filters,
+                    send_agents_report,
                 )
         except Exception:
             logger.exception("Failed to process Telegram update")

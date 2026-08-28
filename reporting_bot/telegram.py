@@ -174,6 +174,7 @@ def _help_text() -> str:
         "/reports_sks — подробный Excel-отчёт СКС с выбором дат\n"
         "/reports_dota — общая и 4 детальные инфографики, Excel-отчёт ДОТ\n"
         "/reports_ks — меню аналитики КС: общий отчёт и отдельные разделы\n"
+        "/report_agents — партнёры с 01.10.2025, оплаченные проекты и агентские выплаты\n"
         "/run &lt;отчёт&gt; [параметр=значение] — сформировать отчёт\n"
         "/whoami — показать ваш Telegram ID\n"
         "/help — помощь"
@@ -189,6 +190,8 @@ def _report_list(catalog: ReportCatalog) -> str:
         "Общая и 4 детальные инфографики, Excel со сводкой, динамикой и детализацией проектов. Команда: /reports_dota",
         "\n<code>reports_ks</code> — Аналитика КС",
         "Общий отчёт и четыре отдельных раздела с фильтрами, Excel и графиком. Команда: /reports_ks",
+        "\n<code>report_agents</code> — Отчёт по партнёрам",
+        "Партнёры с 01.10.2025 без ГТО, оплаченные проекты и агентские выплаты. Команда: /report_agents",
     ]
     for report in catalog.all():
         suffix = ""
@@ -539,6 +542,7 @@ async def handle_message(
     send_dota_report: Callable[[int, date, date], Awaitable[None]] | None = None,
     send_ks_report: Callable[[int, str, date, date, KsFilters, str], Awaitable[None]] | None = None,
     load_ks_filters: Callable[[str], Awaitable[KsFilterOptions]] | None = None,
+    send_agents_report: Callable[[int], Awaitable[None]] | None = None,
 ) -> None:
     command = message.text.split(maxsplit=1)[0].split("@", 1)[0].lower()
 
@@ -589,6 +593,13 @@ async def handle_message(
         return
     if command == "/reports":
         await send_message(message.chat_id, _report_list(catalog))
+        return
+    if command in ("/report_agents", "report_agents", "/reports_agents", "reports_agents"):
+        if send_agents_report is None:
+            await send_message(message.chat_id, "Отчёт по партнёрам временно недоступен.")
+            return
+        await send_message(message.chat_id, "Формирую Excel-отчёт по партнёрам…")
+        await send_agents_report(message.chat_id)
         return
     if command in ("/reports_ks", "reports_ks"):
         await send_message(
