@@ -17,6 +17,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.pool import NullPool
 
 from reporting_bot.config import Settings
+from reporting_bot.chart_layout import comparison_chart, fitted_text
 from reporting_bot.simple_xlsx import STYLE, Workbook
 from reporting_bot.ks_scope import ROSTER, DEPARTMENTS
 
@@ -874,9 +875,9 @@ def _font(size: int, bold: bool = False):
 def _chart_value(value: float, money: bool) -> str:
     if money:
         if abs(value) >= 1_000_000:
-            return f"{value / 1_000_000:.1f} млн"
+            return f"{value / 1_000_000:.1f} млн руб."
         if abs(value) >= 1_000:
-            return f"{value / 1_000:.0f} тыс."
+            return f"{value / 1_000:.0f} тыс. руб."
         return f"{value:.0f} руб."
     return f"{value:.0f}"
 
@@ -900,64 +901,12 @@ def _bar_chart(
     comparison_label: str = "Сравнение",
     cards: Sequence[tuple[str, str, str]] = (),
 ) -> bytes:
-    image = Image.new("RGB", (1200, 1200), "#F4F7FB")
-    draw = ImageDraw.Draw(image)
-    draw.rounded_rectangle((45, 45, 1155, 1155), radius=28, fill="#FFFFFF", outline="#DCE5EF", width=2)
-    title_size = 42
-    title_font = _font(title_size, True)
-    while title_size > 28 and draw.textbbox((0, 0), title, font=title_font)[2] > 1020:
-        title_size -= 2
-        title_font = _font(title_size, True)
-    draw.text((85, 78), title, font=title_font, fill="#173A5E")
-    draw.text((85, 137), subtitle, font=_font(24), fill="#5B6B7C")
-    if cards:
-        card_width = 245
-        for index, (label, value, detail) in enumerate(cards[:4]):
-            left = 85 + index * 255
-            draw.rounded_rectangle(
-                (left, 188, left + card_width, 310),
-                radius=16,
-                fill="#F7F9FC",
-                outline="#DCE5EF",
-                width=2,
-            )
-            draw.text((left + 16, 204), label, font=_font(17), fill="#5B6B7C")
-            draw.text((left + 16, 239), value, font=_font(26, True), fill="#173A5E")
-            draw.text((left + 16, 279), detail, font=_font(14), fill="#7A8998")
-        legend_top = 337
-        start_y = 425
-        available_height = 625
-    else:
-        legend_top = 188
-        start_y = 300
-        available_height = 780
-    draw.rounded_rectangle((85, legend_top, 1105, legend_top + 64), radius=18, fill="#EAF2FA")
-    draw.rectangle((115, legend_top + 22, 143, legend_top + 42), fill="#255985")
-    draw.text((156, legend_top + 14), "Выбранный период", font=_font(20), fill="#213547")
-    draw.rectangle((430, legend_top + 22, 458, legend_top + 42), fill="#E89A3C")
-    draw.text((471, legend_top + 14), comparison_label, font=_font(20), fill="#213547")
-
-    if not labels:
-        draw.text((420, 570), "Нет данных за выбранный период", font=_font(30, True), fill="#66788A")
-    else:
-        maximum = max([*current, *comparison, 1.0])
-        row_height = min(128, available_height // max(len(labels), 1))
-        bar_left = 330
-        bar_width = 680
-        for index, label in enumerate(labels):
-            y = start_y + index * row_height
-            display = label if len(label) <= 23 else label[:22] + "…"
-            draw.text((85, y + 16), display, font=_font(19, True), fill="#213547")
-            current_width = int(bar_width * max(current[index], 0) / maximum)
-            compare_width = int(bar_width * max(comparison[index], 0) / maximum)
-            draw.rounded_rectangle((bar_left, y + 7, bar_left + current_width, y + 32), radius=8, fill="#255985")
-            draw.rounded_rectangle((bar_left, y + 40, bar_left + compare_width, y + 65), radius=8, fill="#E89A3C")
-            draw.text((bar_left + current_width + 10, y + 4), _chart_value(current[index], money), font=_font(17, True), fill="#173A5E")
-            draw.text((bar_left + compare_width + 10, y + 37), _chart_value(comparison[index], money), font=_font(17), fill="#7C5630")
-    draw.text((85, 1092), "EcoStar Reports · данные CRM", font=_font(20), fill="#7A8998")
-    output = io.BytesIO()
-    image.save(output, format="PNG", optimize=True)
-    return output.getvalue()
+    return comparison_chart(
+        title, subtitle, labels, current, comparison, font=_font,
+        formatter=lambda value: _chart_value(value, money),
+        comparison_label=comparison_label, cards=cards,
+        show_comparison=comparison_label != "Без сравнения",
+    )
 
 
 def _summary_chart(data: KsReportData) -> bytes:
@@ -974,12 +923,10 @@ def _summary_chart(data: KsReportData) -> bytes:
         width=2,
     )
     draw.text((85, 78), "КС · Общий отчёт", font=_font(42, True), fill="#173A5E")
-    draw.text(
-        (85, 137),
-        f"{data.date_from:%d.%m.%Y}–{data.date_to:%d.%m.%Y} · {data.filter_labels['department']}",
-        font=_font(24),
-        fill="#5B6B7C",
-    )
+    fitted_text(draw, (85, 137),
+                f"{data.date_from:%d.%m.%Y}–{data.date_to:%d.%m.%Y} · {_filters_text(data)}",
+                _font, width=1020, size=22, fill="#5B6B7C")
+    has_comparison = data.comparison_from is not None and data.comparison_to is not None
 
     conversion = current["conversion"]
     previous_projects = _project_summary(data.comparison_events)
@@ -1003,28 +950,33 @@ def _summary_chart(data: KsReportData) -> bytes:
             outline="#DCE5EF",
             width=2,
         )
-        draw.text((left + 18, top + 12), label, font=_font(16), fill="#5B6B7C")
-        draw.text((left + 18, top + 38), value, font=_font(25, True), fill="#173A5E")
-        draw.text((left + 18, top + 72), detail, font=_font(13), fill="#7A8998")
+        fitted_text(draw, (left + 18, top + 12), label, _font, width=274, size=18, fill="#5B6B7C")
+        fitted_text(draw, (left + 18, top + 38), value, _font, width=274, size=27, bold=True)
+        fitted_text(draw, (left + 18, top + 72), detail, _font, width=274, size=15, fill="#5B6B7C")
 
     panel_top = 425
     draw.rounded_rectangle((85, panel_top, 570, 730), radius=18, fill="#F7F9FC", outline="#DCE5EF", width=2)
     draw.text((108, panel_top + 18), "Деньги: факт и сравнение", font=_font(21, True), fill="#213547")
     draw.rectangle((108, panel_top + 56, 128, panel_top + 70), fill="#255985")
     draw.text((138, panel_top + 49), "Факт", font=_font(15), fill="#5B6B7C")
-    draw.rectangle((222, panel_top + 56, 242, panel_top + 70), fill="#E89A3C")
-    draw.text((252, panel_top + 49), "Сравнение", font=_font(15), fill="#5B6B7C")
+    if has_comparison:
+        draw.rectangle((222, panel_top + 56, 242, panel_top + 70), fill="#E89A3C")
+        draw.text((252, panel_top + 49), "Сравнение", font=_font(15), fill="#5B6B7C")
     current_values = (float(current["cash"]), float(current["occurrence"]))
     previous_values = (float(previous["cash"]), float(previous["occurrence"]))
     maximum = max(*current_values, *previous_values, 1.0)
     for index, label in enumerate(("Касса", "Возникновение")):
         top = panel_top + 95 + index * 92
-        draw.text((108, top), label, font=_font(16, True), fill="#213547")
+        fitted_text(draw, (108, top), label, _font, width=128, size=16, bold=True)
         current_width = int(275 * max(current_values[index], 0) / maximum)
         previous_width = int(275 * max(previous_values[index], 0) / maximum)
         draw.rounded_rectangle((245, top, 245 + current_width, top + 19), radius=6, fill="#255985")
-        draw.rounded_rectangle((245, top + 27, 245 + previous_width, top + 46), radius=6, fill="#E89A3C")
-        draw.text((245, top + 52), f"{_chart_value(current_values[index], True)} / {_chart_value(previous_values[index], True)}", font=_font(14), fill="#5B6B7C")
+        if has_comparison:
+            draw.rounded_rectangle((245, top + 27, 245 + previous_width, top + 46), radius=6, fill="#E89A3C")
+        detail = _chart_value(current_values[index], True)
+        if has_comparison:
+            detail += " / " + _chart_value(previous_values[index], True)
+        fitted_text(draw, (245, top + 52), detail, _font, width=300, size=14, fill="#5B6B7C")
 
     actual_funnel = _funnel_counts(data.events)
     funnel_values = (
@@ -1034,11 +986,11 @@ def _summary_chart(data: KsReportData) -> bytes:
         ("Успех", actual_funnel["Успех"]),
     )
     draw.rounded_rectangle((590, panel_top, 1105, 730), radius=18, fill="#F7F9FC", outline="#DCE5EF", width=2)
-    draw.text((614, panel_top + 18), "Воронка за период", font=_font(21, True), fill="#213547")
+    draw.text((614, panel_top + 18), "События и успех когорты", font=_font(21, True), fill="#213547")
     funnel_max = max((value for _, value in funnel_values), default=1) or 1
     for index, (label, value) in enumerate(funnel_values):
         top = panel_top + 68 + index * 55
-        width = int(330 * value / funnel_max)
+        width = int(260 * value / funnel_max)
         draw.text((614, top), label, font=_font(16), fill="#213547")
         draw.rounded_rectangle((738, top + 2, 738 + width, top + 22), radius=7, fill="#255985" if index < 3 else "#2E9C73")
         draw.text((1080, top - 2), str(value), anchor="ra", font=_font(17, True), fill="#173A5E")
@@ -1058,33 +1010,40 @@ def _summary_chart(data: KsReportData) -> bytes:
             top = 822 + index * 70
             display = name if len(name) <= 24 else name[:23] + "…"
             draw.text((108, top), display, font=_font(17, True), fill="#213547")
-            width = int(560 * value / ranking_max)
+            width = int(490 * value / ranking_max)
             draw.rounded_rectangle((430, top + 2, 430 + width, top + 25), radius=7, fill="#255985")
-            draw.text((1010, top - 2), _chart_value(value, True), font=_font(17, True), fill="#173A5E")
+            fitted_text(draw, (940, top - 2), _chart_value(value, True), _font, width=142, size=18, bold=True)
     else:
         draw.text((410, 885), "Нет данных по менеджерам", font=_font(18), fill="#7A8998")
 
-    draw.text((85, 1092), "EcoStar Reports · данные CRM", font=_font(20), fill="#7A8998")
+    comparison_note = (f"Сравнение: {data.comparison_from:%d.%m.%Y}–{data.comparison_to:%d.%m.%Y}"
+                       if has_comparison else "Без сравнения")
+    draw.text((85, 1080), comparison_note + " · остатки оплат — на момент выгрузки", font=_font(17), fill="#5B6B7C")
+    draw.text((85, 1110), "EcoStar Reports · события периода не являются последовательными этапами одной воронки", font=_font(16), fill="#5B6B7C")
     output = io.BytesIO()
     image.save(output, format="PNG", optimize=True)
     return output.getvalue()
 
 
 def build_ks_chart(data: KsReportData) -> bytes:
-    subtitle = f"{data.date_from:%d.%m.%Y}–{data.date_to:%d.%m.%Y} · {data.filter_labels['department']}"
+    subtitle = f"{data.date_from:%d.%m.%Y}–{data.date_to:%d.%m.%Y} · {_filters_text(data)}"
+    comparison_label = (
+        f"{data.comparison_from:%d.%m.%Y}–{data.comparison_to:%d.%m.%Y}"
+        if data.comparison_from and data.comparison_to else "Без сравнения"
+    )
     if data.report_kind == "all":
         return _summary_chart(data)
     if data.report_kind == "plan":
         current = _metrics(data.events)
         previous = _metrics(data.comparison_events)
         return _bar_chart(
-            "КС · План-факт",
+            "КС · Факт и ориентир",
             subtitle,
             ("Касса", "Возникновение"),
             (float(current["cash"]), float(current["occurrence"])),
             (float(previous["cash"]), float(previous["occurrence"])),
             money=True,
-            comparison_label="План-ориентир",
+            comparison_label=comparison_label,
             cards=(
                 ("Касса", _chart_value(float(current["cash"]), True), _change_label(current["cash"], previous["cash"])),
                 ("Возникновение", _chart_value(float(current["occurrence"]), True), _change_label(current["occurrence"], previous["occurrence"])),
@@ -1109,8 +1068,9 @@ def build_ks_chart(data: KsReportData) -> bytes:
             [float(_metrics(current_groups[name])["occurrence"]) for name in ranking],
             [float(_metrics(previous_groups.get(name, []))["occurrence"]) for name in ranking],
             money=True,
+            comparison_label=comparison_label,
             cards=(
-                ("Менеджеры", str(len(current_groups)), "с активностью за период"),
+                ("Менеджеры", str(len(current_groups)), f"на графике: топ-{len(ranking)}"),
                 ("Звонки", str(current["calls"]), _change_label(current["calls"], previous["calls"])),
                 ("Лиды", str(current["leads"]), _change_label(current["leads"], previous["leads"])),
                 ("Проекты", str(current["projects"]), _change_label(current["projects"], previous["projects"])),
@@ -1123,12 +1083,12 @@ def build_ks_chart(data: KsReportData) -> bytes:
         planned = _planned_funnel(data)
         labels = ("Новая", "Ждём ШР", "Думает", "Успех")
         return _bar_chart(
-            "КС · Фактическая и плановая воронка",
+            "КС · Когорта заявок и расчётный ориентир",
             subtitle,
             labels,
             [float(actual[label]) for label in labels],
             [float(planned[label]) for label in labels],
-            comparison_label="Необходимо",
+            comparison_label="Расчётный ориентир, не утверждённый план" if data.comparison_from else "Без сравнения",
             cards=(
                 ("Лиды", str(current["leads"]), _change_label(current["leads"], previous["leads"])),
                 ("КП", str(current["offers"]), _change_label(current["offers"], previous["offers"])),
@@ -1145,6 +1105,7 @@ def build_ks_chart(data: KsReportData) -> bytes:
         [float(current["occurrence"]), float(current["paid"]), float(current["awaiting"])],
         [float(previous["occurrence"]), float(previous["paid"]), float(previous["awaiting"])],
         money=True,
+        comparison_label=comparison_label,
         cards=(
             ("Проекты · согласовано", f"{current['projects']} · {current['agreed']}", "первый запуск · «Распечатка»"),
             ("Сумма проектов", _chart_value(float(current["occurrence"]), True), _change_label(current["occurrence"], previous["occurrence"])),

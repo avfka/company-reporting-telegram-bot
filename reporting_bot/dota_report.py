@@ -17,6 +17,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.pool import NullPool
 
 from reporting_bot.config import Settings
+from reporting_bot.chart_layout import daily_panel, fitted_text
 from reporting_bot.simple_xlsx import STYLE, Workbook
 
 
@@ -689,10 +690,10 @@ def _dota_font(size: int, bold: bool = False):
 def _dota_money(value: Decimal | float) -> str:
     number = float(value)
     if abs(number) >= 1_000_000:
-        return f"{number / 1_000_000:.1f} млн ₽".replace(".", ",")
+        return f"{number / 1_000_000:.1f}".replace(".", ",") + " млн руб."
     if abs(number) >= 1_000:
-        return f"{number / 1_000:.0f} тыс. ₽"
-    return f"{number:.0f} ₽"
+        return f"{number / 1_000:.0f} тыс. руб."
+    return f"{number:.0f} руб."
 
 
 def _dota_change(current: Decimal | int, previous: Decimal | int) -> str:
@@ -708,7 +709,7 @@ def _dota_plan_label(actual: Decimal, plans: Mapping[str, Decimal]) -> str:
         return "план не задан"
     plan = sum((plans[category] for category in CATEGORIES), Decimal(0))
     if not plan:
-        return "план — 0 ₽"
+        return "план — 0 руб."
     return f"{float(actual / plan) * 100:.0f}% месячного плана"
 
 
@@ -723,9 +724,9 @@ def _draw_dota_card(
     left, top, right, bottom = box
     draw.rounded_rectangle(box, radius=18, fill="#F8FAFD", outline="#DCE5EF", width=2)
     draw.rounded_rectangle((left, top, left + 8, bottom), radius=4, fill=accent)
-    draw.text((left + 22, top + 15), label, font=_dota_font(16), fill="#5B6B7C")
-    draw.text((left + 22, top + 45), value, font=_dota_font(27, True), fill="#173A5E")
-    draw.text((left + 22, top + 82), detail, font=_dota_font(13), fill="#7A8998")
+    fitted_text(draw, (left + 22, top + 15), label, _dota_font, width=right-left-40, size=18, fill="#5B6B7C")
+    fitted_text(draw, (left + 22, top + 45), value, _dota_font, width=right-left-40, size=27, bold=True)
+    fitted_text(draw, (left + 22, top + 82), detail, _dota_font, width=right-left-40, size=15, fill="#5B6B7C")
 
 
 def _dota_share_rows(
@@ -756,7 +757,7 @@ def _draw_dota_donut(
     left, top, right, bottom = box
     colors = ("#255985", "#E89A3C", "#2E9C73", "#7C5AA6", "#98A7B6")
     draw.rounded_rectangle(box, radius=20, fill="#F8FAFD", outline="#DCE5EF", width=2)
-    draw.text((left + 23, top + 18), title, font=_dota_font(21, True), fill="#213547")
+    fitted_text(draw, (left + 23, top + 18), title, _dota_font, width=right-left-46, size=21, bold=True)
     total = sum((amount for _, amount in rows), Decimal(0))
     pie_box = (left + 120, top + 64, left + 380, top + 324)
     if total:
@@ -767,17 +768,16 @@ def _draw_dota_donut(
             angle = next_angle
         draw.ellipse((left + 190, top + 134, left + 310, top + 254), fill="#F8FAFD")
         total_label = _dota_money(total)
-        bbox = draw.textbbox((0, 0), total_label, font=_dota_font(18, True))
-        draw.text((left + 250 - (bbox[2] - bbox[0]) / 2, top + 174), total_label, font=_dota_font(18, True), fill="#173A5E")
+        fitted_text(draw, (left + 196, top + 174), total_label, _dota_font, width=108, size=18, minimum=12, bold=True)
         legend_top = top + 342
         for index, (label, amount) in enumerate(rows):
             y = legend_top + index * 27
             draw.rounded_rectangle((left + 26, y + 3, left + 42, y + 19), radius=4, fill=colors[index % len(colors)])
-            display = label if len(label) <= 22 else label[:21] + "…"
             share = float(amount / total) * 100
-            draw.text((left + 54, y), display, font=_dota_font(14, True), fill="#213547")
-            detail = f"{share:.0f}% · {_dota_money(amount)}"
+            detail = f"{share:.1f}% · {_dota_money(amount)}"
             detail_box = draw.textbbox((0, 0), detail, font=_dota_font(13))
+            label_width = right-left-92-(detail_box[2]-detail_box[0])
+            fitted_text(draw, (left + 54, y), label, _dota_font, width=label_width, size=16, bold=True)
             draw.text((right - 24 - (detail_box[2] - detail_box[0]), y + 1), detail, font=_dota_font(13), fill="#5B6B7C")
     else:
         draw.ellipse(pie_box, fill="#E8EEF5")
@@ -815,43 +815,7 @@ def _draw_dota_daily_panel(
     release: Sequence[float],
     formatter,
 ) -> None:
-    left, top, right, bottom = box
-    blue = "#255985"
-    orange = "#E89A3C"
-    draw.rounded_rectangle(box, radius=20, fill="#F8FAFD", outline="#DCE5EF", width=2)
-    draw.text((left + 23, top + 18), title, font=_dota_font(21, True), fill="#213547")
-    draw.rectangle((right - 330, top + 25, right - 308, top + 40), fill=blue)
-    draw.text((right - 298, top + 18), "Запуск", font=_dota_font(14), fill="#5B6B7C")
-    draw.rectangle((right - 190, top + 25, right - 168, top + 40), fill=orange)
-    draw.text((right - 158, top + 18), "Выпуск", font=_dota_font(14), fill="#5B6B7C")
-
-    chart_left, chart_right = left + 74, right - 30
-    chart_top, chart_bottom = top + 72, bottom - 43
-    maximum = max([*launch, *release, 1.0])
-    draw.line((chart_left, chart_bottom, chart_right, chart_bottom), fill="#C8D4E1", width=2)
-    draw.line((chart_left, chart_top, chart_right, chart_top), fill="#E1E8F0", width=1)
-    maximum_label = formatter(maximum)
-    draw.text((left + 16, chart_top - 8), maximum_label, font=_dota_font(11), fill="#7A8998")
-    draw.text((left + 50, chart_bottom - 7), "0", font=_dota_font(11), fill="#7A8998")
-    if not dates:
-        draw.text((left + 400, top + 130), "Нет данных за период", font=_dota_font(17), fill="#7A8998")
-        return
-
-    group_width = (chart_right - chart_left) / len(dates)
-    bar_width = max(1, min(14, int(group_width * 0.34)))
-    label_every = max(1, (len(dates) + 9) // 10)
-    for index, current_date in enumerate(dates):
-        center = chart_left + group_width * (index + 0.5)
-        launch_height = int((chart_bottom - chart_top - 8) * launch[index] / maximum)
-        release_height = int((chart_bottom - chart_top - 8) * release[index] / maximum)
-        if launch_height:
-            draw.rectangle((int(center - bar_width - 1), chart_bottom - launch_height, int(center - 1), chart_bottom), fill=blue)
-        if release_height:
-            draw.rectangle((int(center + 1), chart_bottom - release_height, int(center + bar_width + 1), chart_bottom), fill=orange)
-        if index % label_every == 0 or index == len(dates) - 1:
-            label = current_date.strftime("%d.%m")
-            bbox = draw.textbbox((0, 0), label, font=_dota_font(10))
-            draw.text((center - (bbox[2] - bbox[0]) / 2, chart_bottom + 9), label, font=_dota_font(10), fill="#5B6B7C")
+    daily_panel(draw, box, title, dates, launch, release, font=_dota_font, formatter=formatter)
 
 
 def _dota_number(value: float) -> str:
@@ -866,7 +830,7 @@ def _dota_compact(value: float, *, money: bool = False) -> str:
         result = f"{value / 1_000:.0f}к"
     else:
         result = f"{value:.0f}"
-    return result + (" ₽" if money else "")
+    return result + (" руб." if money else "")
 
 
 def _dota_breakdown_rows(
@@ -923,9 +887,9 @@ def _build_dota_donut_detail(
     image = Image.new("RGB", (1200, 900), "#F1F4F8")
     draw = ImageDraw.Draw(image)
     navy = "#173A5E"
-    colors = ("#F47C2B", "#FFBC28", "#70AD47", "#A84D0B", "#4E88B5")
+    colors = ("#255985", "#E89A3C", "#2E9C73", "#7C5AA6", "#98A7B6")
     draw.rounded_rectangle((38, 32, 1162, 866), radius=28, fill="#FFFFFF", outline="#D5DEE8", width=2)
-    draw.text((78, 68), title, font=_dota_font(38, True), fill=navy)
+    fitted_text(draw, (78, 68), title, _dota_font, width=1044, size=38, bold=True)
     draw.text((78, 118), subtitle, font=_dota_font(20), fill="#5B6B7C")
     draw.text(
         (78, 151),
@@ -953,8 +917,7 @@ def _build_dota_donut_detail(
             angle = next_angle
         draw.ellipse((237, 370, 467, 600), fill="#FFFFFF")
         total_label = _dota_money(total)
-        bounds = draw.textbbox((0, 0), total_label, font=_dota_font(27, True))
-        draw.text((352 - (bounds[2] - bounds[0]) / 2, 446), total_label, font=_dota_font(27, True), fill=navy)
+        fitted_text(draw, (247, 446), total_label, _dota_font, width=210, size=27, minimum=18, bold=True)
         count_label = f"{len(launches)} проектов"
         bounds = draw.textbbox((0, 0), count_label, font=_dota_font(17))
         draw.text((352 - (bounds[2] - bounds[0]) / 2, 486), count_label, font=_dota_font(17), fill="#6B7A89")
@@ -969,25 +932,22 @@ def _build_dota_donut_detail(
     draw.rectangle((table_left, table_top + 44, table_right, table_top + 62), fill=navy)
     draw.text((table_left + 20, table_top + 19), "Структура запусков", font=_dota_font(19, True), fill="#FFFFFF")
     columns_y = table_top + 83
-    draw.text((table_left + 20, columns_y), "Отдел" if include_workplaces else "Компания", font=_dota_font(14, True), fill="#657587")
-    _draw_right_text(draw, table_left + 326, columns_y, "Деньги", _dota_font(14, True), "#657587")
-    _draw_right_text(draw, table_left + 396, columns_y, "Проекты", _dota_font(14, True), "#657587")
-    _draw_right_text(draw, table_right - 20, columns_y, "РМ" if include_workplaces else "Доля", _dota_font(14, True), "#657587")
+    draw.text((table_left + 20, columns_y), "Доля в сумме запусков", font=_dota_font(18, True), fill="#657587")
     draw.line((table_left + 18, columns_y + 28, table_right - 18, columns_y + 28), fill="#DCE5EF", width=1)
     for index, (label, amount, projects, workplaces) in enumerate(rows):
         y = columns_y + 48 + index * 70
         color = colors[index % len(colors)]
         draw.rounded_rectangle((table_left + 20, y + 2, table_left + 36, y + 18), radius=4, fill=color)
-        display = label if len(label) <= 20 else label[:19] + "…"
-        draw.text((table_left + 47, y), display, font=_dota_font(16, True), fill="#213547")
-        _draw_right_text(draw, table_left + 326, y, _dota_money(amount), _dota_font(15), "#34495E")
-        _draw_right_text(draw, table_left + 396, y, str(projects), _dota_font(15), "#34495E")
-        last_value = str(workplaces) if include_workplaces else (f"{float(amount / total) * 100:.0f}%" if total else "0%")
-        _draw_right_text(draw, table_right - 20, y, last_value, _dota_font(15, True), navy)
+        fitted_text(draw, (table_left + 47, y), label, _dota_font, width=310, size=19, minimum=17, bold=True)
+        share = f"{float(amount / total) * 100:.1f}%" if total else "0%"
+        _draw_right_text(draw, table_right - 20, y, share, _dota_font(20, True), navy)
+        detail = f"{_dota_money(amount)} · {projects} шт." + (f" · {workplaces} РМ" if include_workplaces else "")
+        fitted_text(draw, (table_left + 47, y + 27), detail, _dota_font, width=405, size=17, fill="#586A7E")
         if index < len(rows) - 1:
-            draw.line((table_left + 20, y + 42, table_right - 20, y + 42), fill="#E8EDF3", width=1)
+            draw.line((table_left + 20, y + 58, table_right - 20, y + 58), fill="#E8EDF3", width=1)
 
-    draw.text((78, 818), "EcoStar Reports · данные CRM", font=_dota_font(16), fill="#8291A1")
+    draw.text((78, 794), "Доли: группы с положительной суммой; топ-4 и остальные. Полный состав — в Excel.", font=_dota_font(17), fill="#586A7E")
+    draw.text((78, 825), "EcoStar Reports · данные CRM", font=_dota_font(16), fill="#586A7E")
     output = io.BytesIO()
     image.save(output, format="PNG", optimize=True)
     return output.getvalue()
@@ -1003,54 +963,8 @@ def _draw_dota_dark_daily_panel(
     *,
     money: bool,
 ) -> None:
-    left, top, right, bottom = box
-    launch_fill, launch_outline = "#203D58", "#4DB7F0"
-    release_fill, release_outline = "#5B3A20", "#F29B38"
-    draw.rounded_rectangle(box, radius=18, fill="#333536", outline="#5A5E62", width=2)
-    draw.text((left + 24, top + 19), title, font=_dota_font(22, True), fill="#F5F7FA")
-    legend_y = top + 25
-    draw.rounded_rectangle((right - 310, legend_y, right - 288, legend_y + 16), radius=3, fill=launch_fill, outline=launch_outline, width=2)
-    draw.text((right - 278, top + 18), "Запуск", font=_dota_font(14), fill="#D9E0E7")
-    draw.rounded_rectangle((right - 165, legend_y, right - 143, legend_y + 16), radius=3, fill=release_fill, outline=release_outline, width=2)
-    draw.text((right - 133, top + 18), "Выпуск", font=_dota_font(14), fill="#D9E0E7")
-
-    chart_left, chart_right = left + 82, right - 32
-    chart_top, chart_bottom = top + 76, bottom - 50
-    maximum = max([*launch, *release, 1.0])
-    for step in range(5):
-        y = int(chart_bottom - (chart_bottom - chart_top) * step / 4)
-        draw.line((chart_left, y, chart_right, y), fill="#55595D", width=1)
-        value = maximum * step / 4
-        label = _dota_compact(value, money=money)
-        _draw_right_text(draw, chart_left - 10, y - 8, label, _dota_font(11), "#AEB7C0")
-    if not dates:
-        draw.text((left + 520, top + 160), "Нет данных за период", font=_dota_font(18), fill="#AEB7C0")
-        return
-
-    group_width = (chart_right - chart_left) / len(dates)
-    bar_width = max(2, min(16, int(group_width * 0.32)))
-    label_every = max(1, (len(dates) + 13) // 14)
-    chart_height = chart_bottom - chart_top - 12
-    for index, current_date in enumerate(dates):
-        center = chart_left + group_width * (index + 0.5)
-        values = (
-            (launch[index], int(center - bar_width - 1), launch_fill, launch_outline),
-            (release[index], int(center + 1), release_fill, release_outline),
-        )
-        for value, x, fill, outline in values:
-            height = int(chart_height * value / maximum)
-            if not height:
-                continue
-            draw.rounded_rectangle((x, chart_bottom - height, x + bar_width, chart_bottom), radius=2, fill=fill, outline=outline, width=2)
-            if group_width >= 28:
-                label = _dota_compact(value, money=money)
-                bounds = draw.textbbox((0, 0), label, font=_dota_font(10, True))
-                label_x = x + bar_width / 2 - (bounds[2] - bounds[0]) / 2
-                draw.text((label_x, chart_bottom - height - 18), label, font=_dota_font(10, True), fill="#F2F4F6")
-        if index % label_every == 0 or index == len(dates) - 1:
-            label = current_date.strftime("%d.%m")
-            bounds = draw.textbbox((0, 0), label, font=_dota_font(11))
-            draw.text((center - (bounds[2] - bounds[0]) / 2, chart_bottom + 12), label, font=_dota_font(11), fill="#C3CAD1")
+    daily_panel(draw, box, title, dates, launch, release, font=_dota_font,
+                formatter=lambda value: _dota_compact(value, money=money))
 
 
 def _build_dota_movement_detail(
@@ -1062,31 +976,31 @@ def _build_dota_movement_detail(
 ) -> bytes:
     panel_count = 3 if include_workplaces else 2
     height = 1310 if include_workplaces else 980
-    image = Image.new("RGB", (1400, height), "#242526")
+    image = Image.new("RGB", (1400, height), "#F3F6FA")
     draw = ImageDraw.Draw(image)
-    draw.text((62, 48), title, font=_dota_font(38, True), fill="#FFFFFF")
+    draw.text((62, 48), title, font=_dota_font(38, True), fill="#173A5E")
     draw.text(
         (62, 98),
         f"Динамика по календарным дням · {data.date_from:%d.%m.%Y}–{data.date_to:%d.%m.%Y}",
         font=_dota_font(19),
-        fill="#B9C0C7",
+        fill="#586A7E",
     )
 
     category_rows = [row for row in data.events if row.category == category]
     launches = _events(category_rows, "Запуск")
     releases = _events(category_rows, "Выпуск")
     cards = (
-        ("Запуск, руб.", _dota_money(_sum_amount(launches)), "#4DB7F0"),
-        ("Выпуск, руб.", _dota_money(_sum_amount(releases)), "#F29B38"),
-        ("Запущено проектов", str(len(launches)), "#4DB7F0"),
-        ("Выпущено проектов", str(len(releases)), "#F29B38"),
+        ("Запуск, руб.", _dota_money(_sum_amount(launches)), "#255985"),
+        ("Выпуск, руб.", _dota_money(_sum_amount(releases)), "#D98726"),
+        ("Запущено проектов", str(len(launches)), "#255985"),
+        ("Выпущено проектов", str(len(releases)), "#D98726"),
     )
     for index, (label, value, accent) in enumerate(cards):
         left = 62 + index * 324
-        draw.rounded_rectangle((left, 148, left + 300, 254), radius=12, fill="#333536", outline="#565A5E", width=2)
+        draw.rounded_rectangle((left, 148, left + 300, 254), radius=12, fill="#FFFFFF", outline="#DCE5EF", width=2)
         draw.rectangle((left, 148, left + 7, 254), fill=accent)
-        draw.text((left + 22, 165), label, font=_dota_font(15), fill="#B9C0C7")
-        draw.text((left + 22, 198), value, font=_dota_font(26, True), fill="#FFFFFF")
+        draw.text((left + 22, 165), label, font=_dota_font(18), fill="#586A7E")
+        fitted_text(draw, (left + 22, 198), value, _dota_font, width=256, size=30, bold=True)
 
     dates, money_launch, money_release = _dota_daily_series(data, lambda row: row.amount, category=category)
     _, project_launch, project_release = _dota_daily_series(data, lambda row: 1, category=category)
@@ -1115,7 +1029,7 @@ def build_dota_detail_charts(data: DotaReportData, stem: str) -> tuple[DotaChart
                 data,
                 category="ОПР",
                 title="ОПР · Запуски по отделам",
-                subtitle="Доля выручки, проекты и рабочие места",
+                subtitle="Доля стоимости запущенных проектов · не поступления денег",
                 label_getter=lambda row: row.manager_department,
                 include_workplaces=True,
             ),
@@ -1127,7 +1041,7 @@ def build_dota_detail_charts(data: DotaReportData, stem: str) -> tuple[DotaChart
                 data,
                 category="Обучение",
                 title="Обучение · Запуски по компаниям",
-                subtitle="Доля выручки и количество проектов",
+                subtitle="Доля стоимости запущенных проектов · не поступления денег",
                 label_getter=lambda row: row.company_name,
                 include_workplaces=False,
             ),

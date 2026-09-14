@@ -16,6 +16,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.pool import NullPool
 
 from reporting_bot.config import Settings
+from reporting_bot.chart_layout import fitted_text
 from reporting_bot.simple_xlsx import STYLE, Workbook
 
 
@@ -481,10 +482,10 @@ def _sks_days(value: object) -> str:
 def _sks_money(value: Decimal | float | object) -> str:
     number = float(value)
     if abs(number) >= 1_000_000:
-        return f"{number / 1_000_000:.2f} млн ₽".replace(".", ",")
+        return f"{number / 1_000_000:.2f}".replace(".", ",") + " млн руб."
     if abs(number) >= 1_000:
-        return f"{number / 1_000:.0f} тыс. ₽"
-    return f"{number:.0f} ₽"
+        return f"{number / 1_000:.0f} тыс. руб."
+    return f"{number:.0f} руб."
 
 
 def _sks_time(seconds: float | None) -> str:
@@ -517,9 +518,9 @@ def _draw_sks_card(
     left, top, right, bottom = box
     draw.rounded_rectangle(box, radius=18, fill="#F8FAFD", outline="#DCE5EF", width=2)
     draw.rounded_rectangle((left, top, left + 8, bottom), radius=4, fill=accent)
-    draw.text((left + 22, top + 15), label, font=_sks_font(16), fill="#5B6B7C")
-    draw.text((left + 22, top + 44), value, font=_sks_font(27, True), fill="#173A5E")
-    draw.text((left + 22, top + 82), detail, font=_sks_font(13), fill=detail_color)
+    fitted_text(draw, (left + 22, top + 15), label, _sks_font, width=right-left-40, size=18, fill="#5B6B7C")
+    fitted_text(draw, (left + 22, top + 44), value, _sks_font, width=right-left-40, size=30, bold=True)
+    fitted_text(draw, (left + 22, top + 82), detail, _sks_font, width=right-left-40, size=15, fill=detail_color)
 
 
 def _draw_sks_duration_panel(
@@ -533,10 +534,10 @@ def _draw_sks_duration_panel(
     draw.rounded_rectangle(box, radius=20, fill="#F8FAFD", outline="#DCE5EF", width=2)
     draw.text((left + 24, top + 18), "Скорость работы по специалистам", font=_sks_font(23, True), fill="#213547")
     draw.text((left + 24, top + 51), "Среднее число календарных дней · без аномалий свыше 200 дней", font=_sks_font(14), fill="#7A8998")
-    draw.rounded_rectangle((right - 335, top + 24, right - 317, top + 42), radius=4, fill=blue)
-    draw.text((right - 308, top + 20), "Согласование", font=_sks_font(13), fill="#5B6B7C")
-    draw.rounded_rectangle((right - 180, top + 24, right - 162, top + 42), radius=4, fill=orange)
-    draw.text((right - 153, top + 20), "Отправка", font=_sks_font(13), fill="#5B6B7C")
+    draw.rectangle((left + 24, top + 83, left + 42, top + 98), fill=blue)
+    draw.text((left + 52, top + 77), "Согласование", font=_sks_font(17), fill="#5B6B7C")
+    draw.rectangle((left + 225, top + 83, left + 243, top + 98), fill=orange)
+    draw.text((left + 253, top + 77), "Отправка", font=_sks_font(17), fill="#5B6B7C")
 
     rows: list[tuple[str, float | None, float | None]] = []
     for name in SCS_SPECIALISTS:
@@ -546,28 +547,27 @@ def _draw_sks_duration_panel(
         [PLAN_SEND_DAYS, 1.0]
         + [float(value) for _, agreement, sending in rows for value in (agreement, sending) if value is not None]
     )
-    chart_left = left + 270
-    chart_right = right - 70
+    chart_left = left + 290
+    chart_right = right - 140
     chart_width = chart_right - chart_left
-    row_top = top + 95
-    row_height = 46
+    row_top = top + 125
+    row_height = 48
     plan_x = chart_left + chart_width * min(1.0, PLAN_SEND_DAYS / maximum)
     draw.line((plan_x, row_top - 8, plan_x, bottom - 38), fill="#AAB8C6", width=2)
-    draw.text((plan_x + 6, bottom - 32), "план отправки 4 дня", font=_sks_font(11), fill="#7A8998")
+    draw.text((min(plan_x, right - 230), bottom - 32), "план отправки: 4 дня", font=_sks_font(16), fill="#5B6B7C")
     for index, (name, agreement, sending) in enumerate(rows):
         y = row_top + index * row_height
-        draw.text((left + 24, y + 9), name, font=_sks_font(14, True), fill="#213547")
+        fitted_text(draw, (left + 24, y + 9), name, _sks_font, width=250, size=18, bold=True)
         draw.line((chart_left, y + 14, chart_right, y + 14), fill="#E5EBF2", width=13)
         draw.line((chart_left, y + 35, chart_right, y + 35), fill="#E5EBF2", width=13)
         for value, bar_y, color in ((agreement, y + 14, blue), (sending, y + 35, orange)):
             if value is None:
-                draw.text((chart_left + 5, bar_y - 9), "нет данных", font=_sks_font(11), fill="#98A7B6")
+                draw.text((chart_right + 15, bar_y - 9), "—", font=_sks_font(17), fill="#5B6B7C")
                 continue
             end_x = chart_left + chart_width * min(1.0, float(value) / maximum)
             draw.line((chart_left, bar_y, end_x, bar_y), fill=color, width=13)
             label = f"{float(value):.1f}".replace(".", ",")
-            label_x = min(end_x + 8, chart_right + 8)
-            draw.text((label_x, bar_y - 10), label, font=_sks_font(12, True), fill=color)
+            draw.text((chart_right + 15, bar_y - 11), label + " дн.", font=_sks_font(17, True), fill=color)
 
 
 def _draw_sks_approval_panel(
@@ -584,21 +584,21 @@ def _draw_sks_approval_panel(
         values = _summary_values(data, (name,))
         rows.append((name, int(values["approved_count"]), values["approved_amount"]))
     maximum = max([Decimal(1)] + [amount for _, _, amount in rows])
-    chart_left = left + 270
-    chart_right = right - 175
+    chart_left = left + 290
+    chart_right = right - 285
     chart_width = chart_right - chart_left
     row_top = top + 95
-    row_height = 54
+    row_height = 48
     colors = ("#255985", "#2E7896", "#35949A", "#2E9C73", "#75A85A", "#D39A3E", "#8A6CAB")
     for index, (name, count, amount) in enumerate(rows):
         y = row_top + index * row_height
         color = colors[index % len(colors)]
-        draw.text((left + 24, y + 5), name, font=_sks_font(14, True), fill="#213547")
+        fitted_text(draw, (left + 24, y + 5), name, _sks_font, width=250, size=18, bold=True)
         draw.line((chart_left, y + 15, chart_right, y + 15), fill="#E5EBF2", width=18)
         if amount > 0:
             end_x = chart_left + chart_width * float(amount / maximum)
             draw.line((chart_left, y + 15, end_x, y + 15), fill=color, width=18)
-        draw.text((chart_right + 16, y + 4), _sks_money(amount), font=_sks_font(13, True), fill="#173A5E")
+        fitted_text(draw, (chart_right + 16, y + 4), _sks_money(amount), _sks_font, width=170, size=19, bold=True)
         badge = f"{count} шт."
         badge_box = draw.textbbox((0, 0), badge, font=_sks_font(12, True))
         badge_width = badge_box[2] - badge_box[0] + 18
@@ -626,10 +626,10 @@ def build_sks_chart(data: SksReportData) -> bytes:
     amount_detail, amount_color = _sks_plan_detail(primary["approved_amount"], PLAN_APPROVED_AMOUNT, lower_is_better=False)
     cards = (
         ("Согласование · 6 спец.", _sks_days(primary["agreement_days"]), "среднее за период", blue, "#7A8998"),
-        ("Отправка · все СКС", _sks_days(all_send_average), send_detail, orange, send_color),
-        ("Задачи отправки · Б/К", f"{data.assigned_sending_task_total} шт.", "без двойного счёта", purple, "#7A8998"),
+        ("Отправка · вся выборка", _sks_days(all_send_average), send_detail, orange, send_color),
+        ("Все задачи · Б/К", f"{data.assigned_sending_task_total} шт.", "Балакирева / Кулешева", purple, "#7A8998"),
         ("Задачи · договор/счет", _sks_time(task_average), task_detail, green, task_color),
-        ("Согласовано · все СКС", f"{len(data.agreements)} шт.", count_detail, blue, count_color),
+        ("Согласовано · вся выборка", f"{len(data.agreements)} шт.", count_detail, blue, count_color),
         ("Сумма · 6 спец.", _sks_money(primary["approved_amount"]), amount_detail, orange, amount_color),
     )
     for index, card in enumerate(cards):
@@ -649,8 +649,8 @@ def build_sks_chart(data: SksReportData) -> bytes:
     sending_diana = data.sending_tasks.get("Балакирева Диана", 0)
     sending_vladislava = data.sending_tasks.get("Кулешева Владислава", 0)
     operational_cards = (
-        ("СОУТ · все СКС", f"{len(sout_rows)} шт.", "согласовано за период", blue),
-        ("Другие · все СКС", f"{len(other_rows)} шт.", "согласовано за период", green),
+        ("СОУТ · вся выборка", f"{len(sout_rows)} шт.", "согласовано за период", blue),
+        ("Другие · вся выборка", f"{len(other_rows)} шт.", "согласовано за период", green),
         ("Задачи «отправка»", f"{sending_diana + sending_vladislava} шт.", f"Балакирева {sending_diana} · Кулешева {sending_vladislava}", orange),
         ("Аномалии > 200 дней", f"{anomaly_agreement + anomaly_send} записей", f"согласование {anomaly_agreement} · отправка {anomaly_send}", purple),
     )
@@ -663,7 +663,7 @@ def build_sks_chart(data: SksReportData) -> bytes:
     draw.text((108, 1810), "Как читать показатели", font=_sks_font(17, True), fill="#213547")
     draw.text((108, 1841), "• Положительный процент означает результат лучше плана. План применяется к выбранному периоду без пересчёта.", font=_sks_font(14), fill="#5B6B7C")
     draw.text((108, 1868), "• Среднее отправки = среднее между показателями СОУТ и остальных услуг, как в Google-таблице.", font=_sks_font(14), fill="#5B6B7C")
-    draw.text((108, 1895), "• Задачи с полной календарной длительностью 14 часов и более исключены из расчёта.", font=_sks_font(14), fill="#5B6B7C")
+    draw.text((108, 1895), "• Задачи: Пн–Пт 08:00–17:30; календарный срок от 14 ч исключается до расчёта.", font=_sks_font(14), fill="#5B6B7C")
     draw.text((85, 1932), "EcoStar Reports · подробности и список проектов — в Excel", font=_sks_font(16), fill="#7A8998")
 
     output = io.BytesIO()

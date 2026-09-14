@@ -58,7 +58,8 @@ def test_all_ks_reports_create_valid_workbooks_and_png_charts() -> None:
         chart = build_ks_chart(data)
         image = Image.open(io.BytesIO(chart))
         assert image.format == "PNG"
-        assert image.size == (1200, 1200)
+        assert image.width == 1200
+        assert image.height == {"all": 1200, "plan": 720, "managers": 720, "funnel": 914, "projects": 810}[report_kind]
 
 
 def test_combined_report_contains_every_analytics_section() -> None:
