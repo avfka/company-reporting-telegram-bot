@@ -22,15 +22,23 @@ PARTNERS_SQL = """
 WITH selected_partners AS (
   SELECT p.*
   FROM partners p
-  JOIN users partner_owner ON partner_owner.id = p.manager_id
-    AND partner_owner.role = :partner_manager_role
   WHERE p.created_at >= CAST(:partner_created_from AS DATE)
     AND coalesce(p.group_id, 0) <> :gto_group_id
+), sks_names AS (
+  SELECT DISTINCT project.partner_id,
+    concat_ws(' ', responsible.last_name, responsible.first_name) AS manager
+  FROM projects project
+  JOIN selected_partners partner ON partner.id = project.partner_id
+  JOIN users responsible ON responsible.id = project.manager_sks_id
+    AND responsible.role = :partner_manager_role
+), sks_managers AS (
+  SELECT partner_id, string_agg(manager, ', ' ORDER BY manager) AS manager
+  FROM sks_names GROUP BY partner_id
 ), paid_projects AS (
   SELECT p.*
   FROM projects p
   JOIN selected_partners partner ON partner.id = p.partner_id
-  JOIN users responsible ON responsible.id = p.manager_id
+  JOIN users responsible ON responsible.id = p.manager_sks_id
     AND responsible.role = :partner_manager_role
   WHERE p.is_paid IS TRUE
 ), project_totals AS (
@@ -60,7 +68,7 @@ SELECT
   partner.phone,
   partner.email,
   partner.contacts::text AS contacts,
-  concat_ws(' ', manager.last_name, manager.first_name) AS manager,
+  sks_managers.manager,
   partner.archived_at,
   coalesce(project_totals.paid_project_count, 0) AS paid_project_count,
   coalesce(project_totals.paid_amount, 0) AS paid_amount,
@@ -68,7 +76,7 @@ SELECT
   coalesce(fee_totals.fee_count, 0) AS fee_count,
   coalesce(fee_totals.agent_fee_amount, 0) AS agent_fee_amount
 FROM selected_partners partner
-LEFT JOIN users manager ON manager.id = partner.manager_id
+JOIN sks_managers ON sks_managers.partner_id = partner.id
 LEFT JOIN project_totals ON project_totals.partner_id = partner.id
 LEFT JOIN fee_totals ON fee_totals.partner_id = partner.id
 ORDER BY partner.created_at, partner.name, partner.id
@@ -79,8 +87,6 @@ PAID_PROJECTS_SQL = """
 WITH selected_partners AS (
   SELECT p.id, p.name
   FROM partners p
-  JOIN users partner_owner ON partner_owner.id = p.manager_id
-    AND partner_owner.role = :partner_manager_role
   WHERE p.created_at >= CAST(:partner_created_from AS DATE)
     AND coalesce(p.group_id, 0) <> :gto_group_id
 ), fee_totals AS (
@@ -99,6 +105,7 @@ SELECT
   project.created_at,
   project.contract_number,
   project.service,
+  concat_ws(' ', responsible.last_name, responsible.first_name) AS manager_sks,
   project.payment_date,
   coalesce(project.paid_amount, 0) AS paid_amount,
   coalesce(project.sale_price, 0) AS sale_price,
@@ -106,7 +113,7 @@ SELECT
   coalesce(fee_totals.agent_fee_amount, 0) AS agent_fee_amount
 FROM projects project
 JOIN selected_partners partner ON partner.id = project.partner_id
-JOIN users responsible ON responsible.id = project.manager_id
+JOIN users responsible ON responsible.id = project.manager_sks_id
   AND responsible.role = :partner_manager_role
 LEFT JOIN fee_totals
   ON fee_totals.project_id = project.id
@@ -130,12 +137,10 @@ SELECT
   coalesce(fee.amount, 0) AS agent_fee_amount
 FROM partner_fee fee
 JOIN partners partner ON partner.id = fee.partner_id
-JOIN users partner_owner ON partner_owner.id = partner.manager_id
-  AND partner_owner.role = :partner_manager_role
 JOIN projects project
   ON project.id = fee.project_id
  AND project.partner_id = fee.partner_id
-JOIN users responsible ON responsible.id = project.manager_id
+JOIN users responsible ON responsible.id = project.manager_sks_id
   AND responsible.role = :partner_manager_role
 WHERE partner.created_at >= CAST(:partner_created_from AS DATE)
   AND coalesce(partner.group_id, 0) <> :gto_group_id
@@ -148,15 +153,13 @@ CONTROL_SQL = """
 WITH selected_partners AS (
   SELECT p.id
   FROM partners p
-  JOIN users partner_owner ON partner_owner.id = p.manager_id
-    AND partner_owner.role = :partner_manager_role
   WHERE p.created_at >= CAST(:partner_created_from AS DATE)
     AND coalesce(p.group_id, 0) <> :gto_group_id
 ), paid_projects AS (
   SELECT p.id, p.partner_id, coalesce(p.paid_amount, 0) AS paid_amount
   FROM projects p
   JOIN selected_partners partner ON partner.id = p.partner_id
-  JOIN users responsible ON responsible.id = p.manager_id
+  JOIN users responsible ON responsible.id = p.manager_sks_id
     AND responsible.role = :partner_manager_role
   WHERE p.is_paid IS TRUE
 )
@@ -172,9 +175,10 @@ SELECT
     WHERE p.created_at >= CAST(:partner_created_from AS DATE)
       AND coalesce(p.group_id, 0) <> :gto_group_id
       AND NOT EXISTS (
-        SELECT 1 FROM users partner_owner
-        WHERE partner_owner.id = p.manager_id
-          AND partner_owner.role = :partner_manager_role
+        SELECT 1 FROM projects project
+        JOIN users responsible ON responsible.id = project.manager_sks_id
+        WHERE project.partner_id = p.id
+          AND responsible.role = :partner_manager_role
       )
   ) AS excluded_non_partner_manager_partners,
   (
@@ -184,7 +188,7 @@ SELECT
     WHERE project.is_paid IS TRUE
       AND NOT EXISTS (
         SELECT 1 FROM users responsible
-        WHERE responsible.id = project.manager_id
+        WHERE responsible.id = project.manager_sks_id
           AND responsible.role = :partner_manager_role
       )
   ) AS excluded_non_partner_manager_projects,
@@ -206,7 +210,7 @@ SELECT
       ON project.id = fee.project_id
      AND project.partner_id = fee.partner_id
     JOIN selected_partners partner ON partner.id = fee.partner_id
-    JOIN users responsible ON responsible.id = project.manager_id
+    JOIN users responsible ON responsible.id = project.manager_sks_id
       AND responsible.role = :partner_manager_role
     WHERE project.is_paid IS NOT TRUE
   ) AS fees_on_unpaid_projects
@@ -256,6 +260,7 @@ class PaidPartnerProject:
     sale_price: Decimal
     fee_count: int
     agent_fee_amount: Decimal
+    manager_sks: str = ""
 
 
 @dataclass(frozen=True)
@@ -307,7 +312,7 @@ class AgentsReportService:
             caption=(
                 f"<b>Отчёт по партнёрам</b> · созданы с "
                 f"{PARTNER_CREATED_FROM:%d.%m.%Y} · без ГТО\n"
-                "Ответственные за партнёра и за проект — «Менеджер партнёров»."
+                "Ответственный СКС проекта — в роли «Менеджер партнёров»."
             ),
         )
 
@@ -388,6 +393,7 @@ def _project_from_row(row: Mapping[str, object]) -> PaidPartnerProject:
         sale_price=_decimal(row["sale_price"]),
         fee_count=int(row["fee_count"] or 0),
         agent_fee_amount=_decimal(row["agent_fee_amount"]),
+        manager_sks=_text(row["manager_sks"]),
     )
 
 
@@ -475,9 +481,10 @@ def _build_summary_sheet(workbook: Workbook, data: AgentsReportData, subtitle: s
     note_row = sheet.append(
         [
             "В отчёт включены партнёры, созданные с 01.10.2025, кроме группы ГТО, "
-            "у которых менеджер карточки (partners.manager_id) имеет роль «Менеджер партнёров». "
+            "с проектами, у которых ответственный СКС имеет роль «Менеджер партнёров». "
             "Проект относится к партнёру по projects.partner_id. Учитываются только проекты, у которых "
-            "ответственный (projects.manager_id) имеет роль «Менеджер партнёров» (partnerManager), и is_paid = true. "
+            "ответственный СКС (projects.manager_sks_id) имеет роль partnerManager, и is_paid = true. "
+            "Обычный менеджер проекта и менеджер карточки партнёра могут быть агентами и не ограничивают выборку. "
             "Сумма оплаты берётся из paid_amount. Агентская выплата учитывается только когда partner_fee связан "
             "с тем же партнёром и оплаченным проектом."
         ] + [None] * 6,
@@ -496,7 +503,7 @@ def _build_partners_sheet(workbook: Workbook, rows: Sequence[PartnerSummary], su
     sheet.append([None] * columns)
     sheet.append(
         [
-            "Дата создания", "Партнёр", "Категория", "Менеджер", "Телефон", "Email", "Контакты", "Статус",
+            "Дата создания", "Партнёр", "Категория", "Ответственные СКС", "Телефон", "Email", "Контакты", "Статус",
             "Оплаченные проекты, шт.", "Оплаченная сумма, руб.", "Проекты с выплатами, шт.", "Выплаты, записей",
             "Агентские выплаты, руб.", "После выплат, руб.", "Доля выплат",
         ],
@@ -504,7 +511,7 @@ def _build_partners_sheet(workbook: Workbook, rows: Sequence[PartnerSummary], su
     )
     for row in rows:
         balance = row.paid_amount - row.agent_fee_amount
-        sheet.append(
+        row_number = sheet.append(
             [
                 row.created_at, row.name, row.category, row.manager, row.phone, row.email, row.contacts,
                 "Архивный" if row.archived_at else "Активный", row.paid_project_count, row.paid_amount,
@@ -518,6 +525,7 @@ def _build_partners_sheet(workbook: Workbook, rows: Sequence[PartnerSummary], su
                 STYLE["table_money"], STYLE["table_money"], STYLE["table_percent"],
             ],
         )
+        sheet.row_heights[row_number] = max(30, 15 * ((len(row.manager) + 23) // 24))
     sheet.append(
         [
             "Итого", None, None, None, None, None, None, None,
@@ -544,7 +552,7 @@ def _build_partners_sheet(workbook: Workbook, rows: Sequence[PartnerSummary], su
 
 
 def _build_projects_sheet(workbook: Workbook, rows: Sequence[PaidPartnerProject], subtitle: str) -> None:
-    columns = 12
+    columns = 13
     sheet = workbook.add_sheet("Оплаченные проекты")
     _title(sheet, "Оплаченные проекты", subtitle, columns)
     sheet.append([None] * columns)
@@ -552,7 +560,7 @@ def _build_projects_sheet(workbook: Workbook, rows: Sequence[PaidPartnerProject]
         [
             "Партнёр", "Проект ID", "Дата проекта", "Договор", "Услуга", "Дата оплаты",
             "Оплачено, руб.", "Стоимость, руб.", "Выплат, записей", "Агентские выплаты, руб.",
-            "После выплат, руб.", "Доля выплат",
+            "После выплат, руб.", "Доля выплат", "Ответственный СКС",
         ],
         STYLE["table_header"],
     )
@@ -562,11 +570,13 @@ def _build_projects_sheet(workbook: Workbook, rows: Sequence[PaidPartnerProject]
                 row.partner_name, row.project_id, row.created_at, row.contract_number, _service_label(row.service),
                 row.payment_date or "—", row.paid_amount, row.sale_price, row.fee_count, row.agent_fee_amount,
                 row.paid_amount - row.agent_fee_amount, _ratio(row.agent_fee_amount, row.paid_amount),
+                row.manager_sks,
             ],
             [
                 STYLE["table_text"], STYLE["table_text"], STYLE["table_center"], STYLE["table_text"],
                 STYLE["table_text"], STYLE["table_center"], STYLE["table_money"], STYLE["table_money"],
                 STYLE["table_number"], STYLE["table_money"], STYLE["table_money"], STYLE["table_percent"],
+                STYLE["table_text"],
             ],
         )
     sheet.append(
@@ -590,7 +600,8 @@ def _build_projects_sheet(workbook: Workbook, rows: Sequence[PaidPartnerProject]
     )
     sheet.widths = {0: 38, 1: 38, 2: 17, 3: 23, 4: 19, 5: 17, 6: 21, 7: 21, 8: 19, 9: 24, 10: 23, 11: 17}
     sheet.freeze_rows = 4
-    sheet.auto_filter = f"A4:L{max(4, len(sheet.rows) - 1)}"
+    sheet.widths[12] = 32
+    sheet.auto_filter = f"A4:M{max(4, len(sheet.rows) - 1)}"
 
 
 def _build_fees_sheet(workbook: Workbook, rows: Sequence[AgentFee], subtitle: str) -> None:
@@ -640,8 +651,8 @@ def _build_control_sheet(workbook: Workbook, data: AgentsReportData, subtitle: s
     sheet.append(["Проверка", "Значение", "Ожидание", "Результат", "Что сделано", None], STYLE["table_header"])
     checks = (
         ("Партнёры ГТО", data.control.get("excluded_gto_partners", 0), "Не включать", "Исключено", "Исключены из всех листов"),
-        ("Партнёры других менеджеров", data.control.get("excluded_non_partner_manager_partners", 0), "Не включать", "Исключено", "Менеджер карточки не имеет роли «Менеджер партнёров» или не указан"),
-        ("Оплаченные проекты других ответственных", data.control.get("excluded_non_partner_manager_projects", 0), "Не включать", "Исключено", "Ответственный не имеет роли «Менеджер партнёров» или не указан"),
+        ("Партнёры без подходящих проектов СКС", data.control.get("excluded_non_partner_manager_partners", 0), "Не включать", "Исключено", "Нет проектов с ответственным СКС в роли «Менеджер партнёров»"),
+        ("Оплаченные проекты других ответственных СКС", data.control.get("excluded_non_partner_manager_projects", 0), "Не включать", "Исключено", "Ответственный СКС не имеет роли «Менеджер партнёров» или не указан"),
         ("Оплаченные проекты без суммы", data.control.get("paid_projects_without_amount", 0), "0", None, "Оставлены для прозрачности с суммой 0"),
         ("Выплата закреплена не за партнёром проекта", data.control.get("mismatched_fee_rows", 0), "0", None, "Не включена в агентские выплаты"),
         ("Выплаты по проектам без зелёного флага", data.control.get("fees_on_unpaid_projects", 0), "Не включать", "Исключено", "Исключены из итогов"),
@@ -658,10 +669,10 @@ def _build_control_sheet(workbook: Workbook, data: AgentsReportData, subtitle: s
     rules = (
         "Партнёр: partners.created_at ≥ 01.10.2025 и group_id ≠ 2 (ГТО).",
         "Партнёр проекта: projects.partner_id.",
-        "Ответственный проекта: projects.manager_id → users.role = partnerManager («Менеджер партнёров»).",
-        "Менеджер карточки партнёра: partners.manager_id → users.role = partnerManager («Менеджер партнёров»).",
-        "Оба фильтра обязательны. Менеджер СКС не используется для этих фильтров.",
-        "Только партнёры подходящих менеджеров могут оставаться в списке с нулевыми показателями.",
+        "Ответственный СКС: projects.manager_sks_id → users.role = partnerManager («Менеджер партнёров»).",
+        "projects.manager_id и partners.manager_id не фильтруются: менеджером может быть сам агент.",
+        "В колонке «Ответственные СКС» перечислены уникальные ответственные подходящих проектов партнёра.",
+        "Партнёры только с неоплаченными подходящими проектами остаются с нулями; без подходящих проектов исключаются.",
         "Оплаченный проект: projects.is_paid = true; сумма: projects.paid_amount.",
         "Агентская выплата: partner_fee.amount только при совпадении partner_id у выплаты и проекта.",
         "Архивные партнёры не исключаются: их статус показан на листе «Партнёры».",
