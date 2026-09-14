@@ -44,7 +44,8 @@ def test_all_agent_project_and_fee_queries_filter_project_responsible_role():
 def test_ordinary_owners_are_not_filtered_or_displayed_as_sks():
     for query in (PARTNERS_SQL, PAID_PROJECTS_SQL, AGENT_FEES_SQL, CONTROL_SQL):
         assert "partner_owner" not in query
-        assert ".manager_id" not in query
+        assert "project.manager_id" not in query
+    assert "WHERE owner.role = :partner_manager_role OR sks_managers.partner_id IS NOT NULL" in PARTNERS_SQL
     assert "sks_managers.manager" in PARTNERS_SQL
     assert "AS manager_sks" in PAID_PROJECTS_SQL
 
@@ -66,6 +67,8 @@ def test_mixed_partner_and_project_owners_do_not_leak_into_report():
             ('wrong','Другой менеджер','other','2026-01-01',1),
             ('missing','Без менеджера',NULL,'2026-01-01',1),
             ('empty','Без проектов','pm','2026-01-01',1),
+            ('neither','Не подходит','other','2026-01-01',1),
+            ('unassigned','Не назначен',NULL,'2026-01-01',1),
             ('gto','ГТО','pm','2026-01-01',2),
             ('old','Старый','pm','2025-09-30',1);
           CREATE TABLE projects(id TEXT,partner_id TEXT,manager_id TEXT,manager_sks_id TEXT,is_paid BOOLEAN,paid_amount REAL,
@@ -89,10 +92,17 @@ def test_mixed_partner_and_project_owners_do_not_leak_into_report():
             query = query.replace("string_agg(manager, ', ' ORDER BY manager)", "group_concat(manager, ', ')")
             return [dict(row) for row in db.execute(query, params)]
         partners = run(PARTNERS_SQL)
-        assert {p["partner_id"] for p in partners} == {"good", "wrong", "missing"}
+        assert {p["partner_id"] for p in partners} == {"good", "wrong", "missing", "empty"}
+        assert len(partners) == 4  # Both criteria and multiple projects do not duplicate a partner.
+        by_id = {p["partner_id"]: p for p in partners}
+        assert by_id["good"]["inclusion_basis"] == "Оба условия"
+        assert by_id["wrong"]["inclusion_basis"] == "Ответственный СКС проекта"
+        assert by_id["empty"]["inclusion_basis"] == "Ответственный партнёра"
+        assert by_id["empty"]["paid_project_count"] == by_id["empty"]["paid_amount"] == 0
+        assert by_id["empty"]["manager"] is None
         names = next(p["manager"] for p in partners if p["partner_id"] == "good").split(", ")
         assert sorted(names) == ["Менеджер Марина", "СКС Елена"]
-        assert all("Другой" not in p["manager"] for p in partners)
+        assert all("Другой" not in (p["manager"] or "") for p in partners)
         assert sum(p["paid_project_count"] for p in partners) == 4
         assert sum(p["paid_amount"] for p in partners) == 1900
         assert sum(p["agent_fee_amount"] for p in partners) == 195
@@ -102,7 +112,7 @@ def test_mixed_partner_and_project_owners_do_not_leak_into_report():
         assert next(p for p in projects if p["project_id"] == "p9")["manager_sks"] == "СКС Елена"
         assert {f["fee_id"] for f in run(AGENT_FEES_SQL)} == {"f2", "f3", "f4", "f8", "f10"}
         control = run(CONTROL_SQL)[0]
-        assert control["excluded_non_partner_manager_partners"] == 1
+        assert control["excluded_non_partner_manager_partners"] == 2
         assert control["excluded_non_partner_manager_projects"] == 2
         assert control["excluded_gto_partners"] == 1
         assert control["fees_on_unpaid_projects"] == 1
@@ -190,3 +200,4 @@ def test_agents_workbook_contains_expected_sheets_and_values() -> None:
     assert "Оплаченные проекты других ответственных СКС" in shared
     assert "Ответственные СКС" in shared
     assert "Ответственный СКС Тест" in shared
+    assert "Основание включения" in shared
