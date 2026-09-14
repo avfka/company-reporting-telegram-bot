@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from reporting_bot.config import Settings
+from reporting_bot.agent_dialog import handle_agent_reply, handle_agent_selection, search_prompt
 from reporting_bot.database import QueryResult
 from reporting_bot.ks_reports import KsFilterOptions, KsFilters
 from reporting_bot.reports import Report, ReportCatalog
@@ -176,6 +177,7 @@ def _help_text() -> str:
         "/reports_dota — общая и 4 детальные инфографики, Excel-отчёт ДОТ\n"
         "/reports_ks — меню аналитики КС: общий отчёт и отдельные разделы\n"
         "/report_agents — партнёры с 01.10.2025, оплаченные проекты и агентские выплаты\n"
+        "/report_agent — оплаты конкретного агента за период создания проектов\n"
         "/companies — Excel-выгрузка компаний за выбранный период (ограниченный доступ)\n"
         "/run &lt;отчёт&gt; [параметр=значение] — сформировать отчёт\n"
         "/whoami — показать ваш Telegram ID\n"
@@ -194,6 +196,8 @@ def _report_list(catalog: ReportCatalog) -> str:
         "Общий отчёт и четыре отдельных раздела с фильтрами, Excel и графиком. Команда: /reports_ks",
         "\n<code>report_agents</code> — Отчёт по партнёрам",
         "Партнёры с 01.10.2025 без ГТО, оплаченные проекты и агентские выплаты. Команда: /report_agents",
+        "\n<code>report_agent</code> — Оплаты конкретного агента",
+        "Выбор дат создания проектов и агента по имени. Сводка и детализация. Команда: /report_agent",
         "\n<code>companies</code> — Выгрузка компаний",
         "Компании, созданные за выбранный период; доступ только уполномоченным пользователям. Команда: /companies",
     ]
@@ -234,7 +238,7 @@ def _calendar_markup(
     month: date,
     start: date | None = None,
 ) -> dict[str, Any]:
-    if report_prefix not in {"sks", "dota", "companies", *KS_PREFIXES}:
+    if report_prefix not in {"sks", "dota", "companies", "agent", *KS_PREFIXES}:
         raise ValueError("Unknown report prefix")
     if mode not in {"from", "to"}:
         raise ValueError("Unknown calendar mode")
@@ -548,6 +552,8 @@ async def handle_message(
     load_ks_filters: Callable[[str], Awaitable[KsFilterOptions]] | None = None,
     send_agents_report: Callable[[int], Awaitable[None]] | None = None,
     send_companies_report: Callable[[int, date, date], Awaitable[None]] | None = None,
+    search_agents: Callable | None = None,
+    send_agent_report: Callable | None = None,
 ) -> None:
     command = message.text.split(maxsplit=1)[0].split("@", 1)[0].lower()
 
@@ -559,6 +565,8 @@ async def handle_message(
         return
     if message.user_id not in settings.allowed_user_ids:
         await send_message(message.chat_id, "Доступ запрещён. Передайте администратору ID из команды /whoami.")
+        return
+    if await handle_agent_reply(message, send_message, search_agents):
         return
     manual_context = _manual_manager_context(message.reply_to_text)
     if manual_context is not None:
@@ -598,6 +606,25 @@ async def handle_message(
         return
     if command == "/reports":
         await send_message(message.chat_id, _report_list(catalog))
+        return
+    if command in ("/report_agent", "report_agent", "/reports_agent", "reports_agent"):
+        if search_agents is None or send_agent_report is None:
+            await send_message(message.chat_id, "Отчёт по агенту временно недоступен.")
+            return
+        try:
+            selected = _parse_report_dates(message.text, "report_agent")
+        except ValueError as exc:
+            await send_message(message.chat_id, str(exc))
+            return
+        if selected is None:
+            today = datetime.now(ZoneInfo("Europe/Moscow")).date()
+            await send_message(message.chat_id,
+                               "<b>Отчёт по конкретному агенту</b>\nВыберите период создания проектов. Затем укажите агента.\n"
+                               "Учитывается положительная оплата, включая частичную. Без ГТО.",
+                               _report_entry_markup("agent", today))
+        else:
+            prompt, markup = search_prompt(*selected)
+            await send_message(message.chat_id, prompt, markup)
         return
     if command in ("/companies", "companies"):
         if message.user_id not in COMPANIES_ALLOWED_USER_IDS:
@@ -727,6 +754,7 @@ async def handle_callback(
     send_ks_report: Callable[[int, str, date, date, KsFilters, str], Awaitable[None]] | None = None,
     load_ks_filters: Callable[[str], Awaitable[KsFilterOptions]] | None = None,
     send_companies_report: Callable[[int, date, date], Awaitable[None]] | None = None,
+    send_agent_report: Callable | None = None,
 ) -> None:
     await answer_callback(callback.callback_query_id)
     if callback.chat_type != "private":
@@ -734,6 +762,8 @@ async def handle_callback(
         return
     if callback.user_id not in settings.allowed_user_ids:
         await send_message(callback.chat_id, "Доступ запрещён. Используйте /whoami и передайте ID администратору.")
+        return
+    if await handle_agent_selection(callback, send_message, send_agent_report):
         return
     if callback.data.startswith("companies:") and callback.user_id not in COMPANIES_ALLOWED_USER_IDS:
         await send_message(callback.chat_id, "Доступ к выгрузке компаний запрещён.")
@@ -750,7 +780,7 @@ async def handle_callback(
             _report_entry_markup(prefix, today),
         )
         return
-    if not callback.data.startswith(("sks:", "dota:", "companies:", *(prefix + ":" for prefix in KS_PREFIXES))):
+    if not callback.data.startswith(("sks:", "dota:", "companies:", "agent:", *(prefix + ":" for prefix in KS_PREFIXES))):
         return
     parts = callback.data.split(":")
     report_prefix = parts[0]
@@ -762,6 +792,13 @@ async def handle_callback(
         report_title = "ДОТ"
         report_command = "/reports_dota"
         send_report = send_dota_report
+    elif report_prefix == "agent":
+        report_title = "по агенту"
+        report_command = "/report_agent"
+        async def prompt_agent(chat_id, date_from, date_to):
+            prompt, markup = search_prompt(date_from, date_to)
+            await send_message(chat_id, prompt, markup)
+        send_report = prompt_agent if send_agent_report is not None else None
     elif report_prefix == "companies":
         report_title = "Выгрузка компаний"
         report_command = "/companies"
@@ -798,7 +835,8 @@ async def handle_callback(
                 if report_prefix == "companies"
                 else f"Формирую Excel-отчёт {report_title}…"
             )
-            await send_message(callback.chat_id, message_text)
+            if report_prefix != "agent":
+                await send_message(callback.chat_id, message_text)
             await send_report(callback.chat_id, date_from, date_to)
             return
         if action == "month_from" and len(parts) == 3:
@@ -840,7 +878,8 @@ async def handle_callback(
                 if report_prefix == "companies"
                 else f"Формирую Excel-отчёт {report_title}…"
             )
-            await send_message(callback.chat_id, message_text)
+            if report_prefix != "agent":
+                await send_message(callback.chat_id, message_text)
             await send_report(callback.chat_id, date_from, date_to)
             return
         if report_prefix in KS_PREFIXES and action == "dept" and len(parts) == 5:

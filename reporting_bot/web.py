@@ -8,6 +8,7 @@ from typing import Any, Mapping
 from urllib.parse import parse_qs
 
 from reporting_bot.agents_report import AgentsReportService
+from reporting_bot.agent_report import AgentReportService
 from reporting_bot.companies_report import CompaniesReportService
 from reporting_bot.config import Settings
 from reporting_bot.crm_bridge import CrmBridgeRepository
@@ -164,6 +165,7 @@ class ReportingBotApp:
             dota_service = DotaReportService(self.settings)
             ks_service = KsReportService(self.settings)
             agents_service = AgentsReportService(self.settings)
+            agent_service = AgentReportService(self.settings)
             companies_service = CompaniesReportService(self.settings)
 
             async def run_report(report, parameters):
@@ -249,6 +251,13 @@ class ReportingBotApp:
                     artifact.caption,
                 )
 
+            async def search_agents(query):
+                return await asyncio.to_thread(agent_service.search, query)
+
+            async def send_agent_report(chat_id, partner_id, date_from, date_to):
+                artifact = await asyncio.to_thread(agent_service.create, partner_id, date_from, date_to)
+                await telegram.send_document(chat_id, artifact.workbook, artifact.workbook_filename, artifact.caption)
+
             async def send_agents_report(chat_id):
                 artifact = await asyncio.to_thread(agents_service.create)
                 await telegram.send_document(
@@ -282,6 +291,7 @@ class ReportingBotApp:
                     send_ks_report,
                     load_ks_filters,
                     send_companies_report,
+                    send_agent_report,
                 )
             elif message is not None:
                 await handle_message(
@@ -296,6 +306,8 @@ class ReportingBotApp:
                     load_ks_filters,
                     send_agents_report,
                     send_companies_report,
+                    search_agents,
+                    send_agent_report,
                 )
         except Exception:
             logger.exception("Failed to process Telegram update")

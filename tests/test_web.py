@@ -1,9 +1,12 @@
 import asyncio
+from datetime import date
+from unittest.mock import AsyncMock
 
 import httpx
 
 from reporting_bot.config import Settings
 from reporting_bot.web import create_app
+from reporting_bot.agents_report import AgentsReportArtifact
 
 
 def configured_settings() -> Settings:
@@ -23,6 +26,27 @@ async def request(app, method, path, **kwargs):
         base_url="http://test",
     ) as client:
         return await client.request(method, path, **kwargs)
+
+
+def test_individual_agent_callback_sends_workbook_through_webhook(monkeypatch):
+    calls = []
+    pid = "12345678-1234-1234-1234-123456789012"
+    def create(self, partner_id, start, end):
+        calls.append((partner_id, start, end))
+        return AgentsReportArtifact(b"test-xlsx", "agent.xlsx", "Agent report")
+    document = AsyncMock()
+    monkeypatch.setattr("reporting_bot.web.AgentReportService.create", create)
+    monkeypatch.setattr("reporting_bot.web.TelegramClient.send_document", document)
+    monkeypatch.setattr("reporting_bot.web.TelegramClient.send_message", AsyncMock())
+    monkeypatch.setattr("reporting_bot.web.TelegramClient.answer_callback_query", AsyncMock())
+    response = asyncio.run(request(create_app(configured_settings()), "POST", "/telegram/webhook",
+        headers={"X-Telegram-Bot-Api-Secret-Token": "secret"},
+        json={"callback_query": {"id": "cb", "from": {"id": 42},
+              "message": {"chat": {"id": 42, "type": "private"}},
+              "data": f"ag:go:20260801:20260831:{pid.replace('-', '')}"}}))
+    assert response.status_code == 200
+    assert calls == [(pid, date(2026, 8, 1), date(2026, 8, 31))]
+    document.assert_awaited_once_with(42, b"test-xlsx", "agent.xlsx", "Agent report")
 
 
 def test_health_does_not_expose_secrets() -> None:

@@ -42,6 +42,7 @@ STYLE = {
     "total_percent": 28,
     "note": 29,
     "table_id": 30,
+    "table_date": 31,
 }
 
 
@@ -57,6 +58,12 @@ def _column_name(index: int) -> str:
 def _safe_text(value: object) -> str:
     text = str(value)
     return re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", "", text)
+
+
+@dataclass(frozen=True)
+class Formula:
+    expression: str
+    cached_value: int | float | Decimal
 
 
 @dataclass(frozen=True)
@@ -205,6 +212,11 @@ def _cell_xml(row: int, column: int, cell: Cell) -> str:
     value = cell.value
     if value is None:
         return f'<c r="{reference}"{style}/>' if cell.style else ""
+    if isinstance(value, Formula):
+        return f'<c r="{reference}"{style}><f>{escape(value.expression)}</f><v>{value.cached_value}</v></c>'
+    if isinstance(value, date) and cell.style == STYLE["table_date"]:
+        day = value.date() if isinstance(value, datetime) else value
+        value = (day - date(1899, 12, 30)).days
     if isinstance(value, bool):
         return f'<c r="{reference}"{style} t="b"><v>{1 if value else 0}</v></c>'
     if isinstance(value, timedelta):
@@ -317,6 +329,7 @@ def _styles_xml() -> str:
         (165, 1, 6, 1, "right", False),
         (0, 0, 0, 0, "left", True),
         (49, 0, 0, 1, "left", True),
+        (168, 0, 0, 1, "center", False),
     ]
     xfs = []
     for num_fmt, font, fill, border, alignment, wrap in definitions:
@@ -328,9 +341,9 @@ def _styles_xml() -> str:
     return (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-        '<numFmts count="4"><numFmt numFmtId="164" formatCode="0.00"/>'
+        '<numFmts count="5"><numFmt numFmtId="164" formatCode="0.00"/>'
         '<numFmt numFmtId="165" formatCode="0.00%"/><numFmt numFmtId="166" formatCode="[h]:mm:ss"/>'
-        '<numFmt numFmtId="167" formatCode="#,##0.00"/></numFmts>'
+        '<numFmt numFmtId="167" formatCode="#,##0.00"/><numFmt numFmtId="168" formatCode="dd.mm.yyyy"/></numFmts>'
         f'{fonts}{fills}{borders}<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
         f'<cellXfs count="{len(xfs)}">{"".join(xfs)}</cellXfs>'
         '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
