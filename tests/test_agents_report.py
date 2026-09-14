@@ -7,6 +7,8 @@ from reporting_bot.agents_report import (
     AGENT_FEES_SQL,
     PAID_PROJECTS_SQL,
     PARTNERS_SQL,
+    CONTROL_SQL,
+    PARTNER_MANAGER_ROLE,
     AgentFee,
     AgentsReportData,
     PaidPartnerProject,
@@ -19,6 +21,23 @@ def test_all_report_queries_exclude_gto_partners() -> None:
     for query in (PARTNERS_SQL, PAID_PROJECTS_SQL, AGENT_FEES_SQL):
         assert "coalesce(" in query
         assert "<> :gto_group_id" in query
+
+
+def test_all_agent_project_and_fee_queries_filter_project_responsible_role():
+    assert PARTNER_MANAGER_ROLE == "partnerManager"
+    for query, alias in ((PARTNERS_SQL, "p"), (PAID_PROJECTS_SQL, "project"),
+                         (AGENT_FEES_SQL, "project"), (CONTROL_SQL, "p")):
+        assert f"JOIN users responsible ON responsible.id = {alias}.manager_id" in query
+        assert "responsible.role = :partner_manager_role" in query
+        assert "responsible.id = partner.manager_id" not in query
+        assert "responsible.id = project.manager_sks_id" not in query
+    # Control excludes absent owners too, not just owners with a different role.
+    assert "AND NOT EXISTS (" in CONTROL_SQL
+    assert "excluded_non_partner_manager_projects" in CONTROL_SQL
+    # The unpaid-fee diagnostic must use the same responsible filter.
+    unpaid_query = CONTROL_SQL.split("AS mismatched_fee_rows,")[1]
+    assert "responsible.id = project.manager_id" in unpaid_query
+    assert "responsible.role = :partner_manager_role" in unpaid_query
 
 
 def test_agents_workbook_contains_expected_sheets_and_values() -> None:
@@ -92,3 +111,5 @@ def test_agents_workbook_contains_expected_sheets_and_values() -> None:
     assert "100000" in shared
     assert "15000" in shared
     assert "ГТО" in shared
+    assert "Менеджер партнёров" in shared
+    assert "Оплаченные проекты других ответственных" in shared

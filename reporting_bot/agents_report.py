@@ -15,6 +15,7 @@ from reporting_bot.simple_xlsx import STYLE, Workbook
 
 PARTNER_CREATED_FROM = date(2025, 10, 1)
 GTO_GROUP_ID = 2
+PARTNER_MANAGER_ROLE = "partnerManager"
 
 
 PARTNERS_SQL = """
@@ -27,6 +28,8 @@ WITH selected_partners AS (
   SELECT p.*
   FROM projects p
   JOIN selected_partners partner ON partner.id = p.partner_id
+  JOIN users responsible ON responsible.id = p.manager_id
+    AND responsible.role = :partner_manager_role
   WHERE p.is_paid IS TRUE
 ), project_totals AS (
   SELECT
@@ -99,6 +102,8 @@ SELECT
   coalesce(fee_totals.agent_fee_amount, 0) AS agent_fee_amount
 FROM projects project
 JOIN selected_partners partner ON partner.id = project.partner_id
+JOIN users responsible ON responsible.id = project.manager_id
+  AND responsible.role = :partner_manager_role
 LEFT JOIN fee_totals
   ON fee_totals.project_id = project.id
  AND fee_totals.partner_id = partner.id
@@ -124,6 +129,8 @@ JOIN partners partner ON partner.id = fee.partner_id
 JOIN projects project
   ON project.id = fee.project_id
  AND project.partner_id = fee.partner_id
+JOIN users responsible ON responsible.id = project.manager_id
+  AND responsible.role = :partner_manager_role
 WHERE partner.created_at >= CAST(:partner_created_from AS DATE)
   AND coalesce(partner.group_id, 0) <> :gto_group_id
   AND project.is_paid IS TRUE
@@ -141,6 +148,8 @@ WITH selected_partners AS (
   SELECT p.id, p.partner_id, coalesce(p.paid_amount, 0) AS paid_amount
   FROM projects p
   JOIN selected_partners partner ON partner.id = p.partner_id
+  JOIN users responsible ON responsible.id = p.manager_id
+    AND responsible.role = :partner_manager_role
   WHERE p.is_paid IS TRUE
 )
 SELECT
@@ -150,6 +159,17 @@ SELECT
     WHERE p.created_at >= CAST(:partner_created_from AS DATE)
       AND p.group_id = :gto_group_id
   ) AS excluded_gto_partners,
+  (
+    SELECT count(*)
+    FROM projects project
+    JOIN selected_partners partner ON partner.id = project.partner_id
+    WHERE project.is_paid IS TRUE
+      AND NOT EXISTS (
+        SELECT 1 FROM users responsible
+        WHERE responsible.id = project.manager_id
+          AND responsible.role = :partner_manager_role
+      )
+  ) AS excluded_non_partner_manager_projects,
   (
     SELECT count(*)
     FROM paid_projects
@@ -168,6 +188,8 @@ SELECT
       ON project.id = fee.project_id
      AND project.partner_id = fee.partner_id
     JOIN selected_partners partner ON partner.id = fee.partner_id
+    JOIN users responsible ON responsible.id = project.manager_id
+      AND responsible.role = :partner_manager_role
     WHERE project.is_paid IS NOT TRUE
   ) AS fees_on_unpaid_projects
 """
@@ -266,7 +288,8 @@ class AgentsReportService:
             workbook_filename=stem + ".xlsx",
             caption=(
                 f"<b>Отчёт по партнёрам</b> · созданы с "
-                f"{PARTNER_CREATED_FROM:%d.%m.%Y} · без ГТО"
+                f"{PARTNER_CREATED_FROM:%d.%m.%Y} · без ГТО\n"
+                "Только проекты с ответственным в роли «Менеджер партнёров»."
             ),
         )
 
@@ -279,11 +302,12 @@ class AgentsReportService:
         params = {
             "partner_created_from": PARTNER_CREATED_FROM,
             "gto_group_id": GTO_GROUP_ID,
+            "partner_manager_role": PARTNER_MANAGER_ROLE,
         }
         try:
             with engine.connect() as connection:
                 with connection.begin():
-                    connection.execute(text("SET TRANSACTION READ ONLY"))
+                    connection.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
                     connection.execute(
                         text("SELECT set_config('statement_timeout', :timeout, true)"),
                         {"timeout": f"{max(self._settings.statement_timeout_ms, 30_000)}ms"},
@@ -433,14 +457,15 @@ def _build_summary_sheet(workbook: Workbook, data: AgentsReportData, subtitle: s
     note_row = sheet.append(
         [
             "В отчёт включены все партнёры, созданные с 01.10.2025, кроме группы ГТО. "
-            "Проект относится к партнёру по projects.partner_id и считается оплаченным только при is_paid = true. "
+            "Проект относится к партнёру по projects.partner_id. Учитываются только проекты, у которых "
+            "ответственный (projects.manager_id) имеет роль «Менеджер партнёров» (partnerManager), и is_paid = true. "
             "Сумма оплаты берётся из paid_amount. Агентская выплата учитывается только когда partner_fee связан "
             "с тем же партнёром и оплаченным проектом."
         ] + [None] * 6,
         STYLE["note"],
     )
     sheet.merges.append(f"A{note_row}:G{note_row}")
-    sheet.row_heights[note_row] = 72
+    sheet.row_heights[note_row] = 96
     sheet.widths = {0: 35, 1: 21, 2: 14, 3: 38, 4: 12, 5: 12, 6: 12}
     sheet.freeze_rows = 4
 
@@ -596,6 +621,7 @@ def _build_control_sheet(workbook: Workbook, data: AgentsReportData, subtitle: s
     sheet.append(["Проверка", "Значение", "Ожидание", "Результат", "Что сделано", None], STYLE["table_header"])
     checks = (
         ("Партнёры ГТО", data.control.get("excluded_gto_partners", 0), "Не включать", "Исключено", "Исключены из всех листов"),
+        ("Оплаченные проекты других ответственных", data.control.get("excluded_non_partner_manager_projects", 0), "Не включать", "Исключено", "Ответственный не имеет роли «Менеджер партнёров» или не указан"),
         ("Оплаченные проекты без суммы", data.control.get("paid_projects_without_amount", 0), "0", None, "Оставлены для прозрачности с суммой 0"),
         ("Выплата закреплена не за партнёром проекта", data.control.get("mismatched_fee_rows", 0), "0", None, "Не включена в агентские выплаты"),
         ("Выплаты по проектам без зелёного флага", data.control.get("fees_on_unpaid_projects", 0), "Не включать", "Исключено", "Исключены из итогов"),
@@ -612,6 +638,9 @@ def _build_control_sheet(workbook: Workbook, data: AgentsReportData, subtitle: s
     rules = (
         "Партнёр: partners.created_at ≥ 01.10.2025 и group_id ≠ 2 (ГТО).",
         "Партнёр проекта: projects.partner_id.",
+        "Ответственный проекта: projects.manager_id → users.role = partnerManager («Менеджер партнёров»).",
+        "Роль ответственного партнёра (partners.manager_id) и менеджера СКС не используется для этого фильтра.",
+        "Партнёры без подходящих проектов остаются в списке с нулевыми показателями.",
         "Оплаченный проект: projects.is_paid = true; сумма: projects.paid_amount.",
         "Агентская выплата: partner_fee.amount только при совпадении partner_id у выплаты и проекта.",
         "Архивные партнёры не исключаются: их статус показан на листе «Партнёры».",
