@@ -81,7 +81,8 @@ def test_combined_report_contains_every_analytics_section() -> None:
 def test_product_filter_uses_compact_hash_token() -> None:
     from reporting_bot.ks_reports import PROJECTS_SQL
 
-    assert "left(md5(lower(coalesce(p.service, ''))), 6)" in PROJECTS_SQL
+    assert "left(md5(CASE" in PROJECTS_SQL
+    assert "= 'соут' THEN 'sout'" in PROJECTS_SQL
 
 
 def test_manager_filter_accepts_multiple_compact_tokens() -> None:
@@ -90,19 +91,87 @@ def test_manager_filter_accepts_multiple_compact_tokens() -> None:
     assert "ANY(string_to_array(:manager_token, ','))" in PROJECTS_SQL
 
 
-def test_ks_sql_uses_request_cohort_experts_and_positive_payments() -> None:
+def test_ks_sql_uses_event_dates_managers_and_positive_payments() -> None:
     from reporting_bot.ks_reports import OFFERS_SQL, PAYMENTS_SQL, PROJECTS_SQL, REQUESTS_SQL
 
     assert "NOT IN ('Не лид', 'Дубль')" not in REQUESTS_SQL
     assert "o.id::text AS event_id" in OFFERS_SQL
     assert "o.is_sent" not in OFFERS_SQL
-    assert "r.created_at >= CAST(:date_from AS DATE)" in OFFERS_SQL
-    assert "p.expert_id IS NOT NULL" in PROJECTS_SQL
-    assert "u.id = p.expert_id" in PROJECTS_SQL
+    assert "o.created_at >= CAST(:date_from AS DATE)" in OFFERS_SQL
+    assert "r.created_at >= CAST(:date_from AS DATE)" not in OFFERS_SQL
+    assert "k.user_id=p.manager_id" in PROJECTS_SQL
+    assert "min(l.created_at)" in PROJECTS_SQL
+    assert "('measurer_id','expert_id')" in PROJECTS_SQL
     assert "psh.new_step = 'Распечатка'" in PROJECTS_SQL
     assert "pay.amount > 0" in PAYMENTS_SQL
-    assert "u.id = p.expert_id" in PAYMENTS_SQL
-    assert "r.created_at >= CAST(:date_from AS DATE)" in PAYMENTS_SQL
+    assert "k.user_id=p.manager_id" in PAYMENTS_SQL
+    assert 'pay."chargeAt" >= CAST(:date_from AS DATE)' in PAYMENTS_SQL
+    assert "r.created_at >= CAST(:date_from AS DATE)" not in PAYMENTS_SQL
+
+
+def test_roster_is_explicit_and_has_only_five_approved_gto_users() -> None:
+    from collections import Counter
+    from reporting_bot.ks_scope import ROSTER
+
+    assert len(ROSTER) == len({r[0] for r in ROSTER}) == 22
+    assert Counter(r[2] for r in ROSTER) == {"op": 9, "siber": 4, "kam": 3, "skam": 1, "aop": 5}
+    assert sum(r[3] == 2 for r in ROSTER) == 5
+    assert len({r[0].replace('-', '')[:6] for r in ROSTER}) == 22
+    assert next(r[2] for r in ROSTER if r[1] == "Шергина Надежда") == "kam"
+
+
+def test_manual_manager_reply_supports_new_department_tokens() -> None:
+    from reporting_bot.telegram import _manual_manager_context
+    for token in ('op', 'siber', 'kam', 'skam', 'aop'):
+        result = _manual_manager_context(f'KSM|ksa|20260901|20260914|{token}|-|-'.replace('|-|-', '|-|p'))
+        assert result is not None
+        assert result[3] == token
+
+
+def test_stale_department_filter_fails_explicitly() -> None:
+    import pytest
+    from reporting_bot.ks_reports import _validate_filters, KsFilterOptions, FilterOption
+    options = KsFilterOptions((FilterOption('op', 'ОП'),), (), ())
+    with pytest.raises(ValueError, match="заново"):
+        _validate_filters(options, KsFilters(department_token='cde48f'))
+
+
+def test_project_balance_does_not_use_only_current_period_cash() -> None:
+    from reporting_bot.ks_reports import _metrics, _project_summary
+
+    rows = (
+        KsEvent("Проект", "p1", date(2026, 9, 1), "А", "ОП", "sout", Decimal(100), paid_amount=Decimal(80), project_id="p1"),
+        KsEvent("Платёж", "pay1", date(2026, 9, 2), "А", "ОП", "sout", Decimal(20), project_id="p1"),
+        KsEvent("Платёж", "old-project-pay", date(2026, 9, 2), "А", "ОП", "sout", Decimal(400), project_id="old"),
+    )
+    assert _metrics(rows)["cash"] == 420
+    assert _project_summary(rows)["paid"] == 80
+    assert _project_summary(rows)["awaiting"] == 20
+
+
+def test_normalized_service_and_auditable_workbook() -> None:
+    from reporting_bot.ks_reports import _service_label
+    assert _service_label(" соут ") == _service_label("SOUT") == "СОУТ"
+    with zipfile.ZipFile(io.BytesIO(build_ks_workbook(sample_data("all")))) as archive:
+        content = ''.join(archive.read(n).decode() for n in archive.namelist() if n.endswith('.xml'))
+    for value in ("Состав КС", "Правила расчёта", "ID проекта", "Все оплаты проекта, руб.", "Айсина Юлианна"):
+        assert value in content
+
+
+def test_query_row_limit_raises_instead_of_returning_partial_data() -> None:
+    import pytest
+    from reporting_bot.ks_reports import _load_events
+
+    class Result:
+        def mappings(self):
+            return [{}] * 10001
+
+    class Connection:
+        def execute(self, *args):
+            return Result()
+
+    with pytest.raises(ValueError, match="не обрезается"):
+        _load_events(Connection(), date(2026, 9, 1), date(2026, 9, 14), KsFilters())
 
 
 def test_conversion_is_success_over_all_requests_in_cohort() -> None:

@@ -410,7 +410,7 @@ def _ks_manual_manager_prompt(
     text_value = (
         heading
         + "Введите ФИО менеджеров через запятую или каждое с новой строки.\n"
-        + "Например: <code>Иванова Елена, Максимович Анастасия</code>\n\n"
+        + "Например: <code>Витовский Артур, Медякова Ксения</code>\n\n"
         + f"Код выбора: <code>{marker}</code>"
     )
     return text_value, {
@@ -424,7 +424,7 @@ def _manual_manager_context(reply_to_text: str | None) -> tuple[str, date, date,
     if not reply_to_text:
         return None
     match = re.search(
-        r"KSM\|(ksa|ksp|ksm|ksf|ksj)\|(\d{8})\|(\d{8})\|([a-f0-9-]+)\|([a-f0-9-]+)\|([pyn])",
+        r"KSM\|(ksa|ksp|ksm|ksf|ksj)\|(\d{8})\|(\d{8})\|([a-z0-9-]+)\|([a-f0-9-]+)\|([pyn])",
         reply_to_text,
     )
     if match is None:

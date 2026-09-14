@@ -18,6 +18,7 @@ from sqlalchemy.pool import NullPool
 
 from reporting_bot.config import Settings
 from reporting_bot.simple_xlsx import STYLE, Workbook
+from reporting_bot.ks_scope import ROSTER, DEPARTMENTS
 
 
 REPORT_TITLES = {
@@ -82,7 +83,7 @@ class KsEvent:
     status: str = "—"
     stage: str = "—"
     current_step: str = "—"
-    paid_amount: Decimal = Decimal(0)
+    paid_amount: Decimal | None = None
     cohort_at: date | datetime | None = None
     project_id: str = ""
     is_agreed: bool = False
@@ -111,225 +112,10 @@ class KsReportArtifact:
     caption: str
 
 
-DEPARTMENT_OPTIONS_SQL = """
-SELECT left(replace(d.id::text, '-', ''), 6) AS token, d.name AS label
-FROM departments d
-WHERE d.group_id = 1
-ORDER BY d.name
-"""
-
-
-MANAGER_OPTIONS_SQL = """
-SELECT DISTINCT
-  left(replace(u.id::text, '-', ''), 6) AS token,
-  concat_ws(' ', u.last_name, u.first_name) AS label
-FROM users u
-LEFT JOIN department_members dm ON dm.member_id = u.id
-LEFT JOIN departments d ON d.id = dm.department_id AND d.group_id = 1
-WHERE u.is_active
-  AND u.group_id = 1
-  AND (
-    :department_token = '-'
-    OR left(replace(coalesce(d.id::text, ''), '-', ''), 6) = :department_token
-  )
-ORDER BY label
-"""
-
-
-PRODUCT_OPTIONS_SQL = """
-SELECT left(md5(service), 6) AS token, service AS label
-FROM (
-  SELECT lower(service) AS service FROM requests_clone
-  WHERE group_id = 1 AND service IS NOT NULL AND service <> ''
-  UNION
-  SELECT lower(service) AS service FROM projects
-  WHERE group_id = 1 AND service IS NOT NULL AND service <> ''
-) services
-ORDER BY service
-"""
-
-
-REQUESTS_SQL = """
-SELECT
-  r.id::text AS event_id,
-  r.created_at AS event_at,
-  r.created_at AS cohort_at,
-  concat_ws(' ', u.last_name, u.first_name) AS manager,
-  coalesce(d.name, 'Без отдела') AS department,
-  coalesce(r.service, '') AS service,
-  coalesce(r.price, 0) AS amount,
-  coalesce(r.status, '—') AS status,
-  coalesce(r.stage, '—') AS stage
-FROM requests_clone r
-LEFT JOIN users u ON u.id = r.manager_id
-LEFT JOIN LATERAL (
-  SELECT dep.id, dep.name
-  FROM department_members dm
-  JOIN departments dep ON dep.id = dm.department_id AND dep.group_id = 1
-  WHERE dm.member_id = r.manager_id
-  ORDER BY dep.name
-  LIMIT 1
-) d ON true
-WHERE r.group_id = 1
-  AND r.created_at >= CAST(:date_from AS DATE)
-  AND r.created_at < CAST(:date_to_exclusive AS DATE)
-  AND r.deleted_at IS NULL
-  AND r.archived_at IS NULL
-  AND (:department_token = '-' OR left(replace(coalesce(d.id::text, ''), '-', ''), 6) = :department_token)
-  AND (:manager_token = '-' OR left(replace(coalesce(r.manager_id::text, ''), '-', ''), 6) = ANY(string_to_array(:manager_token, ',')))
-  AND (:service = '-' OR left(md5(lower(coalesce(r.service, ''))), 6) = :service)
-ORDER BY r.created_at, r.id
-LIMIT 10000
-"""
-
-
-OFFERS_SQL = """
-SELECT
-  o.id::text AS event_id,
-  o.created_at AS event_at,
-  r.created_at AS cohort_at,
-  concat_ws(' ', u.last_name, u.first_name) AS manager,
-  coalesce(d.name, 'Без отдела') AS department,
-  coalesce(nullif(o.service, ''), r.service, '') AS service,
-  coalesce(r.price, 0) AS amount,
-  coalesce(o.number, '—') AS reference
-FROM offers o
-JOIN requests_clone r ON r.id = o.request_id AND r.group_id = 1
-LEFT JOIN users u ON u.id = coalesce(o.user_id, r.manager_id)
-LEFT JOIN LATERAL (
-  SELECT dep.id, dep.name
-  FROM department_members dm
-  JOIN departments dep ON dep.id = dm.department_id AND dep.group_id = 1
-  WHERE dm.member_id = coalesce(o.user_id, r.manager_id)
-  ORDER BY dep.name
-  LIMIT 1
-) d ON true
-WHERE r.deleted_at IS NULL
-  AND r.archived_at IS NULL
-  AND r.created_at >= CAST(:date_from AS DATE)
-  AND r.created_at < CAST(:date_to_exclusive AS DATE)
-  AND (:department_token = '-' OR left(replace(coalesce(d.id::text, ''), '-', ''), 6) = :department_token)
-  AND (:manager_token = '-' OR left(replace(coalesce(coalesce(o.user_id, r.manager_id)::text, ''), '-', ''), 6) = ANY(string_to_array(:manager_token, ',')))
-  AND (:service = '-' OR left(md5(lower(coalesce(nullif(o.service, ''), r.service, ''))), 6) = :service)
-ORDER BY o.created_at, o.id
-LIMIT 10000
-"""
-
-
-PROJECTS_SQL = """
-SELECT
-  p.id::text AS event_id,
-  p.created_at AS event_at,
-  r.created_at AS cohort_at,
-  p.id::text AS project_id,
-  concat_ws(' ', u.last_name, u.first_name) AS manager,
-  coalesce(d.name, 'Без отдела') AS department,
-  coalesce(p.service, '') AS service,
-  coalesce(p.sale_price, 0) AS amount,
-  coalesce(p.contract_number, '—') AS reference,
-  coalesce(p.current_step, '—') AS current_step,
-  coalesce(p.paid_amount, 0) AS paid_amount,
-  (
-    p.current_step = 'Распечатка'
-    OR EXISTS (
-      SELECT 1
-      FROM projects_steps_history psh
-      WHERE psh.project_id = p.id
-        AND psh.new_step = 'Распечатка'
-    )
-  ) AS is_agreed
-FROM projects p
-JOIN requests_clone r ON r.id = p.request_id AND r.group_id = 1
-LEFT JOIN users u ON u.id = p.expert_id
-LEFT JOIN LATERAL (
-  SELECT dep.id, dep.name
-  FROM department_members dm
-  JOIN departments dep ON dep.id = dm.department_id AND dep.group_id = 1
-  WHERE dm.member_id = p.expert_id
-  ORDER BY dep.name
-  LIMIT 1
-) d ON true
-WHERE p.group_id = 1
-  AND p.expert_id IS NOT NULL
-  AND r.deleted_at IS NULL
-  AND r.archived_at IS NULL
-  AND r.created_at >= CAST(:date_from AS DATE)
-  AND r.created_at < CAST(:date_to_exclusive AS DATE)
-  AND (:department_token = '-' OR left(replace(coalesce(d.id::text, ''), '-', ''), 6) = :department_token)
-  AND (:manager_token = '-' OR left(replace(coalesce(p.expert_id::text, ''), '-', ''), 6) = ANY(string_to_array(:manager_token, ',')))
-  AND (:service = '-' OR left(md5(lower(coalesce(p.service, ''))), 6) = :service)
-ORDER BY p.created_at, p.id
-LIMIT 10000
-"""
-
-
-PAYMENTS_SQL = """
-SELECT
-  pay.id::text AS event_id,
-  coalesce(pay."chargeAt", pay."createdAt"::date, p.created_at) AS event_at,
-  r.created_at AS cohort_at,
-  p.id::text AS project_id,
-  concat_ws(' ', u.last_name, u.first_name) AS manager,
-  coalesce(d.name, 'Без отдела') AS department,
-  coalesce(p.service, '') AS service,
-  coalesce(pay.amount, 0) AS amount,
-  coalesce(pay."contractNumber", p.contract_number, '—') AS reference,
-  coalesce(p.current_step, '—') AS current_step
-FROM payment pay
-JOIN projects p ON p.id = pay."projectId" AND p.group_id = 1
-JOIN requests_clone r ON r.id = p.request_id AND r.group_id = 1
-LEFT JOIN users u ON u.id = p.expert_id
-LEFT JOIN LATERAL (
-  SELECT dep.id, dep.name
-  FROM department_members dm
-  JOIN departments dep ON dep.id = dm.department_id AND dep.group_id = 1
-  WHERE dm.member_id = p.expert_id
-  ORDER BY dep.name
-  LIMIT 1
-) d ON true
-WHERE pay.group_id = 1
-  AND pay."deletedAt" IS NULL
-  AND pay.amount > 0
-  AND p.expert_id IS NOT NULL
-  AND r.deleted_at IS NULL
-  AND r.archived_at IS NULL
-  AND r.created_at >= CAST(:date_from AS DATE)
-  AND r.created_at < CAST(:date_to_exclusive AS DATE)
-  AND (:department_token = '-' OR left(replace(coalesce(d.id::text, ''), '-', ''), 6) = :department_token)
-  AND (:manager_token = '-' OR left(replace(coalesce(p.expert_id::text, ''), '-', ''), 6) = ANY(string_to_array(:manager_token, ',')))
-  AND (:service = '-' OR left(md5(lower(coalesce(p.service, ''))), 6) = :service)
-ORDER BY pay."chargeAt", pay.id
-LIMIT 10000
-"""
-
-
-CALLS_SQL = """
-SELECT
-  c.id::text AS event_id,
-  c.call_date AS event_at,
-  concat_ws(' ', u.last_name, u.first_name) AS manager,
-  coalesce(d.name, 'Без отдела') AS department,
-  '' AS service,
-  0 AS amount,
-  coalesce(c.direction::text, '—') AS reference
-FROM calls c
-JOIN users u ON u.id = c.user_id AND u.group_id = 1
-LEFT JOIN LATERAL (
-  SELECT dep.id, dep.name
-  FROM department_members dm
-  JOIN departments dep ON dep.id = dm.department_id AND dep.group_id = 1
-  WHERE dm.member_id = c.user_id
-  ORDER BY dep.name
-  LIMIT 1
-) d ON true
-WHERE c.call_date >= CAST(:date_from AS DATE)
-  AND c.call_date < CAST(:date_to_exclusive AS DATE)
-  AND (:department_token = '-' OR left(replace(coalesce(d.id::text, ''), '-', ''), 6) = :department_token)
-  AND (:manager_token = '-' OR left(replace(c.user_id::text, '-', ''), 6) = ANY(string_to_array(:manager_token, ',')))
-  AND :service = '-'
-ORDER BY c.call_date, c.id
-LIMIT 10000
-"""
+from reporting_bot.ks_scope import (
+    DEPARTMENT_OPTIONS_SQL, MANAGER_OPTIONS_SQL, PRODUCT_OPTIONS_SQL,
+    REQUESTS_SQL, OFFERS_SQL, PROJECTS_SQL, PAYMENTS_SQL, CALLS_SQL,
+)
 
 
 class KsReportService:
@@ -340,6 +126,8 @@ class KsReportService:
         )
 
     def filter_options(self, department_token: str = "-") -> KsFilterOptions:
+        if department_token != "-" and department_token not in dict(DEPARTMENTS):
+            raise ValueError("Список отделов КС обновлён. Запустите команду отчёта заново.")
         engine = self._engine()
         try:
             with engine.connect() as connection:
@@ -421,7 +209,7 @@ class KsReportService:
         )
 
     def _read_only(self, connection) -> None:
-        connection.execute(text("SET TRANSACTION READ ONLY"))
+        connection.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
         connection.execute(
             text("SELECT set_config('statement_timeout', :timeout, true)"),
             {"timeout": f"{max(self._settings.statement_timeout_ms, 30_000)}ms"},
@@ -440,13 +228,14 @@ class KsReportService:
             with engine.connect() as connection:
                 with connection.begin():
                     self._read_only(connection)
+                    options = _load_filter_options(connection, filters.department_token)
+                    _validate_filters(options, filters)
                     events = _load_events(connection, date_from, date_to, filters)
                     comparison_events = (
                         _load_events(connection, comparison_from, comparison_to, filters)
                         if comparison_from is not None and comparison_to is not None
                         else ()
                     )
-                    options = _load_filter_options(connection, filters.department_token)
             labels = {
                 "department": _option_label(options.departments, filters.department_token, "Все отделы"),
                 "manager": _option_label(options.managers, filters.manager_token, "Все менеджеры"),
@@ -473,6 +262,17 @@ def _load_filter_options(connection, department_token: str) -> KsFilterOptions:
         for row in connection.execute(text(PRODUCT_OPTIONS_SQL)).mappings()
     )
     return KsFilterOptions(departments, managers, products)
+
+
+def _validate_filters(options: KsFilterOptions, filters: KsFilters) -> None:
+    choices = (
+        (filters.department_token, {o.token for o in options.departments}),
+        (filters.manager_token, {o.token for o in options.managers}),
+        (filters.service, {o.token for o in options.products}),
+    )
+    for selected, allowed in choices:
+        if selected != "-" and not set(selected.split(",")) <= allowed:
+            raise ValueError("Состав КС или фильтры изменились. Запустите команду отчёта заново.")
 
 
 def _option_label(
@@ -509,7 +309,10 @@ def _load_events(
         ("Платёж", PAYMENTS_SQL),
         ("Звонок", CALLS_SQL),
     ):
-        for row in connection.execute(text(sql), params).mappings():
+        result_rows = list(connection.execute(text(sql), params).mappings())
+        if len(result_rows) > 10000:
+            raise ValueError(f"Более 10 000 записей «{kind}». Сократите период или выберите отдел: отчёт не обрезается автоматически.")
+        for row in result_rows:
             events.append(
                 KsEvent(
                     kind=kind,
@@ -560,7 +363,9 @@ def _comparison_period(
 def _service_label(value: str | None) -> str:
     if not value:
         return "Не указан"
-    normalized = value.lower()
+    normalized = value.strip().lower()
+    if normalized == "соут":
+        normalized = "sout"
     return SERVICE_LABELS.get(normalized, value)
 
 
@@ -631,7 +436,42 @@ def build_ks_workbook(data: KsReportData) -> bytes:
         _build_funnel_workbook(workbook, data)
     else:
         _build_projects_workbook(workbook, data)
+    _build_methodology(workbook, data)
     return workbook.to_bytes()
+
+
+def _selected_roster(data: KsReportData):
+    tokens = set(data.filters.manager_token.split(","))
+    return [row for row in ROSTER
+            if (data.filters.department_token == "-" or row[2] == data.filters.department_token)
+            and (data.filters.manager_token == "-" or row[0].replace("-", "")[:6] in tokens)]
+
+
+def _build_methodology(workbook: Workbook, data: KsReportData) -> None:
+    sheet = workbook.add_sheet("Правила расчёта")
+    sheet.append(["Показатель", "Источник и правило"], STYLE["table_header"])
+    rules = (
+        ("Касса", "payment.amount > 0; deletedAt пусто; chargeAt в выбранном периоде. Частичные и несколько платежей суммируются. Возвраты не учитываются. Платежи без chargeAt или связи с проектом не включаются."),
+        ("Возникновение", "projects.sale_price один раз на ID проекта. Дата — самое раннее systemlogs.created_at, когда expert_id или measurer_id изменилось с пустого на непустое. Повторное назначение не создаёт новый запуск. Без даты в журнале проект не включается; дата создания не подставляется."),
+        ("Менеджер", "Проекты и касса: projects.manager_id. Лиды и КП: requests_clone.manager_id. Звонки: calls.user_id. Текущий ответственный на момент выгрузки, не эксперт и не СКС."),
+        ("Лиды и конверсия", "Все неудалённые и неархивные заявки, созданные в периоде. Успех — их текущий успешный статус. Конверсия = Успех / число заявок × 100%."),
+        ("КП", "Число offers по дате offers.created_at, ответственный — менеджер связанной заявки. Не ограничивается датой создания заявки."),
+        ("Оплаты и остатки проектов", "Для проектов с возникновением в периоде берутся все положительные неудалённые платежи на дату выгрузки. Остаток каждого = max(sale_price − оплаты, 0). Это не касса за выбранный период и не исторический остаток на конец периода."),
+        ("Согласование", "Текущий этап «Распечатка» либо наличие этого этапа в projects_steps_history."),
+        ("План-ориентир", "Факт предыдущего аналогичного периода, не утверждённый план."),
+        ("Распределение", "Сентябрь 2026.xlsx, лист 01.09, A3:A29. Только 22 согласованные карточки, включая пять ГТО. Это распределение применяется и к сравнению; исторические переводы между отделами не восстанавливаются."),
+        ("Источник распределения", "https://disk.360.yandex.ru/edit/d/7XvglQIX1UyEi3GeuyXIWCPegnqahzm72s0qoIz-cKg6RGI0MnBrcWN6Zw?from_public=1"),
+    )
+    for name, rule in rules:
+        r = sheet.append([name, rule], STYLE["table_text"])
+        sheet.row_heights[r] = 65
+    sheet.widths = {0: 30, 1: 115}
+    roster_sheet = workbook.add_sheet("Состав КС")
+    roster_sheet.append(["Менеджер", "Отдел КС", "ID CRM", "Группа CRM"], STYLE["table_header"])
+    for uid, name, dept, group in _selected_roster(data):
+        roster_sheet.append([name, dict(DEPARTMENTS)[dept], uid, group], STYLE["table_text"])
+    roster_sheet.widths = {0: 30, 1: 20, 2: 40, 3: 17}
+    roster_sheet.freeze_rows = 1
 
 
 def _period_text(data: KsReportData) -> str:
@@ -704,7 +544,7 @@ def _build_plan_workbook(
         )
     sheet.append([None] * 8)
     note = sheet.append(
-        ["Период формирует когорту по дате поступления заявки. Лид — любая неудалённая и неархивная заявка независимо от текущего статуса; конверсия = Успех / Новая. КП, проекты и положительные платежи учитываются по заявкам этой когорты, даже если произошли позже. План-ориентир временно равен факту предыдущего аналогичного периода."] + [None] * 7,
+        ["Касса — положительные платежи по дате оплаты, без возвратов. Возникновение — стоимость проекта один раз по первому назначению замерщика или эксперта из журнала CRM. КП — по дате создания. Лиды и конверсия — когорта заявок. Менеджер — ответственный за проект/заявку, не эксперт. План-ориентир равен факту предыдущего периода, это не загруженный план."] + [None] * 7,
         STYLE["note"],
     )
     sheet.merges.append(f"A{note}:H{note}")
@@ -745,7 +585,10 @@ def _build_dimension_sheet(
     )
     current_groups = _dimension_rows(data.events, field)
     previous_groups = _dimension_rows(data.comparison_events, field)
-    keys = sorted(set(current_groups) | set(previous_groups))
+    keys = set(current_groups) | set(previous_groups)
+    if field == "department":
+        keys.update(dict(DEPARTMENTS)[r[2]] for r in _selected_roster(data))
+    keys = sorted(keys)
     for key in keys:
         current = _metrics(current_groups.get(key, []))
         previous = _metrics(previous_groups.get(key, []))
@@ -778,11 +621,12 @@ def _build_managers_workbook(
     )
     current_groups = _manager_groups(data.events)
     previous_groups = _manager_groups(data.comparison_events)
-    for manager in sorted(set(current_groups) | set(previous_groups)):
+    roster_departments = {r[1]: dict(DEPARTMENTS)[r[2]] for r in _selected_roster(data)}
+    for manager in sorted(set(current_groups) | set(previous_groups) | set(roster_departments)):
         rows = current_groups.get(manager, [])
         current = _metrics(rows)
         previous = _metrics(previous_groups.get(manager, []))
-        department = next((row.department for row in rows if row.department), "Без отдела")
+        department = next((row.department for row in rows if row.department), roster_departments.get(manager, "Без отдела"))
         sheet.append(
             [manager, department, current["calls"], current["leads"], current["offers"], current["projects"], current["conversion"] or "—", current["cash"], current["occurrence"], _change(Decimal(current["occurrence"]), Decimal(previous["occurrence"]))],
             [STYLE["table_text"], STYLE["table_text"], STYLE["table_number"], STYLE["table_number"], STYLE["table_number"], STYLE["table_number"], STYLE["table_percent"], STYLE["table_money"], STYLE["table_money"], STYLE["table_percent"]],
@@ -883,10 +727,15 @@ def _project_summary(events: Sequence[KsEvent]) -> dict[str, Decimal | int]:
     projects = _events(events, "Проект")
     payments = [row for row in _events(events, "Платёж") if row.amount > 0]
     occurrence = _sum(projects)
-    paid = _sum(payments)
     paid_by_project: dict[str, Decimal] = defaultdict(Decimal)
     for payment in payments:
         paid_by_project[payment.project_id] += payment.amount
+
+    # Cash is period-based; project balances use all recorded positive payments.
+    for project in projects:
+        if project.paid_amount is not None:
+            paid_by_project[project.event_id] = project.paid_amount
+    paid = sum((paid_by_project[row.event_id] for row in projects), Decimal(0))
 
     def subset_totals(subset: Sequence[KsEvent]) -> tuple[Decimal, Decimal, Decimal]:
         project_ids = {row.event_id for row in subset}
@@ -941,7 +790,7 @@ def _build_projects_workbook(
     sheet.append([None] * 7)
     sheet.append(["Показатель", "Факт", "Пред. период", "Изменение", "Оплачено, руб.", "Ожидает оплаты, руб.", "Сумма проектов, руб."], STYLE["table_header"])
     sheet.append(
-        ["Проекты когорты", current["projects"], previous["projects"], _change(int(current["projects"]), int(previous["projects"])), current["paid"], current["awaiting"], current["occurrence"]],
+        ["Проекты, запущенные в периоде", current["projects"], previous["projects"], _change(int(current["projects"]), int(previous["projects"])), current["paid"], current["awaiting"], current["occurrence"]],
         [STYLE["total_text"], STYLE["total_number"], STYLE["total_number"], STYLE["total_percent"], STYLE["total_money"], STYLE["total_money"], STYLE["total_money"]],
     )
     sheet.append(
@@ -954,7 +803,7 @@ def _build_projects_workbook(
     )
     sheet.append([None] * 7)
     note = sheet.append(
-        ["Период формирует когорту заявок. Проект учитывается, если связан с заявкой когорты и на него назначен эксперт; возникновение = сумма projects.sale_price. Учитываются все положительные неудалённые платежи, включая частичные и повторные; возвраты исключены. Ожидает оплаты = стоимость проекта минус сумма его положительных платежей. Согласованный проект — достиг этапа «Распечатка» по истории переходов."] + [None] * 6,
+        ["Проект включён по первому назначению замерщика или эксперта в периоде. Стоимость — projects.sale_price на момент выгрузки. Оплачено здесь — все положительные неудалённые платежи этих проектов на момент выгрузки, не касса за период. Остаток — сумма max(стоимость проекта − его оплаты, 0). Возвраты исключены. Согласован — достиг «Распечатки». Проекты без подтверждённой даты назначения не включаются."] + [None] * 6,
         STYLE["note"],
     )
     sheet.merges.append(f"A{note}:G{note}")
@@ -986,18 +835,18 @@ def _build_detail_sheet(
     events: Sequence[KsEvent],
 ) -> None:
     sheet = workbook.add_sheet("Детализация")
-    _title(sheet, "Детализация расчёта", data, 11)
-    sheet.append([None] * 11)
-    sheet.append(["Тип", "Дата события", "Дата заявки (когорта)", "Менеджер / эксперт", "Отдел", "Продукт", "Сумма, руб.", "Номер / ID", "Статус", "Этап заявки", "Этап проекта"], STYLE["table_header"])
+    _title(sheet, "Детализация расчёта", data, 15)
+    sheet.append([None] * 15)
+    sheet.append(["Тип", "Дата события", "Дата заявки (когорта)", "Менеджер", "Отдел", "Продукт", "Сумма, руб.", "Номер / ID", "Статус", "Этап заявки", "Этап проекта", "ID записи", "ID проекта", "Все оплаты проекта, руб.", "Остаток проекта, руб."], STYLE["table_header"])
     for row in events:
         sheet.append(
-            [row.kind, row.event_at, row.cohort_at or "—", row.manager, row.department, _service_label(row.service), row.amount, row.reference if row.reference != "—" else row.event_id, row.status, row.stage, row.current_step],
-            [STYLE["table_text"], STYLE["table_center"], STYLE["table_center"], STYLE["table_text"], STYLE["table_text"], STYLE["table_text"], STYLE["table_money"], STYLE["table_text"], STYLE["table_text"], STYLE["table_text"], STYLE["table_text"]],
+            [row.kind, row.event_at, row.cohort_at or "—", row.manager, row.department, _service_label(row.service), row.amount, row.reference if row.reference != "—" else row.event_id, row.status, row.stage, row.current_step, row.event_id, row.project_id or "—", row.paid_amount if row.kind == "Проект" else None, max(row.amount - (row.paid_amount or Decimal(0)), Decimal(0)) if row.kind == "Проект" else None],
+            [STYLE["table_text"], STYLE["table_center"], STYLE["table_center"], STYLE["table_text"], STYLE["table_text"], STYLE["table_text"], STYLE["table_money"], STYLE["table_text"], STYLE["table_text"], STYLE["table_text"], STYLE["table_text"], STYLE["table_text"], STYLE["table_text"], STYLE["table_money"], STYLE["table_money"]],
         )
-    sheet.widths = {0: 14, 1: 18, 2: 23, 3: 28, 4: 24, 5: 22, 6: 18, 7: 25, 8: 22, 9: 25, 10: 31}
+    sheet.widths = {0: 14, 1: 18, 2: 23, 3: 28, 4: 24, 5: 22, 6: 18, 7: 25, 8: 22, 9: 25, 10: 31, 11: 39, 12: 39, 13: 25, 14: 25}
     sheet.freeze_rows = 6
     if events:
-        sheet.auto_filter = f"A6:K{len(sheet.rows)}"
+        sheet.auto_filter = f"A6:O{len(sheet.rows)}"
 
 
 @lru_cache(maxsize=32)
@@ -1139,7 +988,7 @@ def _summary_chart(data: KsReportData) -> bytes:
         ("Возникновение", _chart_value(float(current["occurrence"]), True), _change_label(current["occurrence"], previous["occurrence"])),
         ("Ожидает оплаты", _chart_value(float(projects["awaiting"]), True), _change_label(projects["awaiting"], previous_projects["awaiting"])),
         ("Лиды", str(current["leads"]), _change_label(current["leads"], previous["leads"])),
-        ("Проекты · согласовано", f"{current['projects']} · {projects['agreed']}", "назначен эксперт · достигли «Распечатки»"),
+        ("Проекты · согласовано", f"{current['projects']} · {projects['agreed']}", "первый запуск · «Распечатка»"),
         ("Конверсия", f"{float(conversion) * 100:.1f}%" if conversion is not None else "—", "успех / новая"),
     )
     for index, (label, value, detail) in enumerate(cards):
@@ -1297,7 +1146,7 @@ def build_ks_chart(data: KsReportData) -> bytes:
         [float(previous["occurrence"]), float(previous["paid"]), float(previous["awaiting"])],
         money=True,
         cards=(
-            ("Проекты · согласовано", f"{current['projects']} · {current['agreed']}", "эксперт назначен · этап «Распечатка»"),
+            ("Проекты · согласовано", f"{current['projects']} · {current['agreed']}", "первый запуск · «Распечатка»"),
             ("Сумма проектов", _chart_value(float(current["occurrence"]), True), _change_label(current["occurrence"], previous["occurrence"])),
             ("Оплачено", _chart_value(float(current["paid"]), True), _change_label(current["paid"], previous["paid"])),
             ("Ожидает оплаты", _chart_value(float(current["awaiting"]), True), _change_label(current["awaiting"], previous["awaiting"])),
